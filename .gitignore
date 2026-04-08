@@ -1,2 +1,7 @@
 .env
 tmp/
+cookies.txt
+__pycache__/
+.venv/
+logs/
+.chinvex-status.json

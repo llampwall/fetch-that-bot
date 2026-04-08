@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yt_dlp
 
-from config import TEMP_DIR, MAX_UPLOAD_BYTES
+from config import TEMP_DIR, MAX_UPLOAD_BYTES, COOKIES_FILE
 
 
 @dataclass
@@ -73,6 +73,28 @@ def _collect_files(download_dir: str) -> list[Path]:
     return files
 
 
+def _gallery_dl_fallback(url: str, download_dir: str) -> list[Path]:
+    """Fallback to gallery-dl for image extraction (handles image-only tweets, etc.)."""
+    cmd = [
+        str(Path(__file__).parent / ".venv" / "Scripts" / "gallery-dl.exe"),
+        "--dest", download_dir,
+        "--option", "extractor.directory=[]",
+        "--option", "extractor.filename={num:>03}_{id}.{extension}",
+        url,
+    ]
+    if os.path.isfile(COOKIES_FILE):
+        cmd.extend(["--cookies", COOKIES_FILE])
+
+    subprocess.run(cmd, capture_output=True, timeout=60)
+
+    # gallery-dl may still create subdirs — collect from all of them
+    files = _collect_files(download_dir)
+    for sub in Path(download_dir).iterdir():
+        if sub.is_dir():
+            files.extend(_collect_files(str(sub)))
+    return files
+
+
 def extract_media(url: str, platform: str) -> ExtractionResult:
     """Download media from a URL using yt-dlp and return extracted items."""
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -82,14 +104,18 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
         "outtmpl": os.path.join(download_dir, "%(autonumber)03d_%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
-        # Write thumbnails for image-based posts
-        "writethumbnail": True,
         # Prefer mp4 for video
         "merge_output_format": "mp4",
-        "format": "best[ext=mp4]/best",
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
+        # Move moov atom to front of file so Telegram can stream inline
+        "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
         # Don't download overly massive files — we'll compress if needed
         "max_filesize": MAX_UPLOAD_BYTES * 3,
     }
+
+    # Use cookies if available (needed for Instagram stories, private content)
+    if os.path.isfile(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
 
     result = ExtractionResult(platform=platform)
 
@@ -106,9 +132,9 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
             or info.get("title")
             or info.get("fulltitle")
         )
-        # Truncate long captions (Telegram limit is 1024 for media captions)
-        if result.caption and len(result.caption) > 800:
-            result.caption = result.caption[:800] + "..."
+        # Keep post captions short — just enough context, not the whole essay
+        if result.caption and len(result.caption) > 200:
+            result.caption = result.caption[:200] + "..."
 
         # Collect downloaded files
         files = _collect_files(download_dir)
@@ -128,10 +154,24 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
             elif _is_image(f):
                 result.items.append(MediaItem(file_path=f, media_type="photo"))
 
-    except Exception as e:
-        # Clean up on failure
-        shutil.rmtree(download_dir, ignore_errors=True)
-        raise RuntimeError(f"Extraction failed for {url}: {e}") from e
+    except Exception:
+        # yt-dlp failed — will try gallery-dl fallback below
+        pass
+
+    # Fallback to gallery-dl if yt-dlp got nothing (e.g. image-only tweets)
+    if not result.items:
+        try:
+            fallback_files = _gallery_dl_fallback(url, download_dir)
+            for f in fallback_files[:10]:
+                if _is_video(f):
+                    if f.stat().st_size > MAX_UPLOAD_BYTES:
+                        f = _compress_video(f)
+                    result.items.append(MediaItem(file_path=f, media_type="video"))
+                elif _is_image(f):
+                    result.items.append(MediaItem(file_path=f, media_type="photo"))
+        except Exception as e:
+            shutil.rmtree(download_dir, ignore_errors=True)
+            raise RuntimeError(f"Extraction failed for {url}: {e}") from e
 
     return result
 
