@@ -8,6 +8,7 @@ BOT_TOKEN = os.environ.get("FETCH_BOT_TOKEN", "")
 WEBHOOK_URL = os.environ.get("FETCH_WEBHOOK_URL", "")  # e.g. https://yourtunnel.com/webhook/fetch
 WEBHOOK_PATH = "/webhook/fetch"
 WEBHOOK_PORT = int(os.environ.get("FETCH_WEBHOOK_PORT", "8443"))
+API_PORT = int(os.environ.get("FETCH_API_PORT", "8444"))
 TEMP_DIR = os.environ.get("FETCH_TEMP_DIR", os.path.join(os.path.dirname(__file__), "tmp"))
 COOKIES_FILE = os.environ.get("FETCH_COOKIES_FILE", os.path.join(os.path.dirname(__file__), "cookies.txt"))
 

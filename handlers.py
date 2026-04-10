@@ -85,7 +85,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 item = result.items[0]
                 with open(item.file_path, "rb") as f:
                     if item.media_type == "video":
-                        await context.bot.send_video(chat_id, video=f, caption=caption, supports_streaming=True)
+                        await context.bot.send_video(
+                            chat_id,
+                            video=f,
+                            caption=caption,
+                            supports_streaming=True,
+                            width=item.width,
+                            height=item.height,
+                            duration=item.duration,
+                        )
                     else:
                         await context.bot.send_photo(chat_id, photo=f, caption=caption)
 
@@ -98,7 +106,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     file_handles.append(fh)
                     item_caption = caption if i == 0 else None
                     if item.media_type == "video":
-                        media_group.append(InputMediaVideo(media=fh, caption=item_caption, supports_streaming=True))
+                        media_group.append(InputMediaVideo(
+                            media=fh,
+                            caption=item_caption,
+                            supports_streaming=True,
+                            width=item.width,
+                            height=item.height,
+                            duration=item.duration,
+                        ))
                     else:
                         media_group.append(InputMediaPhoto(media=fh, caption=item_caption))
 
