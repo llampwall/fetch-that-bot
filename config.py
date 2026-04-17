@@ -28,6 +28,7 @@ URL_PATTERNS = re.compile(
     r"|(?:old\.)?reddit\.com/r/\w+/(?:comments|s)/[\w]+"
     r"|v\.redd\.it/[\w]+"
     r"|i\.redd\.it/[\w.]+"
+    r"|threads\.(?:net|com)/(?:@[\w.]+/post|t)/[\w]+"
     r")"
     r"[/\w\-\?=&%.]*",
     re.IGNORECASE,
@@ -46,6 +47,8 @@ PLATFORM_MAP = {
     "old.reddit.com": "Reddit",
     "v.redd.it": "Reddit",
     "i.redd.it": "Reddit",
+    "threads.net": "Threads",
+    "threads.com": "Threads",
 }
 
 

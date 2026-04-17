@@ -40,6 +40,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     chat_id = message.chat_id
+    thread_id = message.message_thread_id  # None unless in a forum topic/thread
     user_name = message.from_user.first_name if message.from_user else "Someone"
     user_text = _strip_urls(message.text)
 
@@ -62,7 +63,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if not results:
         # Everything failed — reply with error, don't delete original
-        await message.reply_text("Couldn't fetch this one — link might be private or down.")
+        await context.bot.send_message(
+            chat_id,
+            "Couldn't fetch this one — link might be private or down.",
+            message_thread_id=thread_id,
+        )
         return
 
     # Delete original message (only if we have at least one success)
@@ -93,9 +98,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             width=item.width,
                             height=item.height,
                             duration=item.duration,
+                            message_thread_id=thread_id,
                         )
                     else:
-                        await context.bot.send_photo(chat_id, photo=f, caption=caption)
+                        await context.bot.send_photo(
+                            chat_id, photo=f, caption=caption,
+                            message_thread_id=thread_id,
+                        )
 
             elif len(result.items) > 1:
                 # Send as album — caption goes on the first item only
@@ -117,7 +126,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     else:
                         media_group.append(InputMediaPhoto(media=fh, caption=item_caption))
 
-                await context.bot.send_media_group(chat_id, media=media_group)
+                await context.bot.send_media_group(
+                    chat_id, media=media_group,
+                    message_thread_id=thread_id,
+                )
 
                 for fh in file_handles:
                     fh.close()

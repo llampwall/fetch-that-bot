@@ -12,6 +12,8 @@ import yt_dlp
 
 from config import TEMP_DIR, MAX_UPLOAD_BYTES, COOKIES_FILE
 
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 
 @dataclass
 class MediaItem:
@@ -44,6 +46,7 @@ def _probe_video(path: Path) -> dict | None:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
             capture_output=True, text=True, check=True, timeout=30,
+            creationflags=_NO_WINDOW,
         )
         data = json.loads(result.stdout)
         video_stream = next(
@@ -121,7 +124,7 @@ def _prepare_video(path: Path) -> tuple[Path, dict | None]:
         cmd += ["-crf", "23", "-vf", "setsar=1"]
     cmd.append(str(out))
 
-    subprocess.run(cmd, capture_output=True, timeout=600)
+    subprocess.run(cmd, capture_output=True, timeout=600, creationflags=_NO_WINDOW)
 
     if out.exists() and out.stat().st_size > 0:
         new_info = _probe_video(out) or info
@@ -154,7 +157,7 @@ def _gallery_dl_fallback(url: str, download_dir: str) -> list[Path]:
     if os.path.isfile(COOKIES_FILE):
         cmd.extend(["--cookies", COOKIES_FILE])
 
-    subprocess.run(cmd, capture_output=True, timeout=60)
+    subprocess.run(cmd, capture_output=True, timeout=60, creationflags=_NO_WINDOW)
 
     # gallery-dl may still create subdirs — collect from all of them
     files = _collect_files(download_dir)
@@ -237,7 +240,8 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
 
     except Exception:
         # yt-dlp failed — will try gallery-dl fallback below
-        pass
+        import logging as _log
+        _log.getLogger(__name__).exception("yt-dlp extraction failed for %s", url)
 
     # Fallback to gallery-dl if yt-dlp got nothing (e.g. image-only tweets)
     if not result.items:
