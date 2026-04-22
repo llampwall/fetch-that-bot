@@ -10,9 +10,17 @@ from pathlib import Path
 
 import yt_dlp
 
-from config import TEMP_DIR, MAX_UPLOAD_BYTES, COOKIES_FILE
+from config import TEMP_DIR, MAX_UPLOAD_BYTES, COOKIES_FILE, MAX_YOUTUBE_DURATION
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+class VideoDurationExceeded(Exception):
+    """Raised when a video exceeds the configured max duration."""
+    def __init__(self, duration: int, limit: int):
+        self.duration = duration
+        self.limit = limit
+        super().__init__(f"Video is {duration}s, limit is {limit}s")
 
 
 @dataclass
@@ -197,6 +205,19 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
         ydl_opts["cookiefile"] = COOKIES_FILE
 
     result = ExtractionResult(platform=platform)
+
+    # Pre-download duration check for YouTube
+    if platform == "YouTube" and MAX_YOUTUBE_DURATION > 0:
+        try:
+            with yt_dlp.YoutubeDL({**ydl_opts, "quiet": True}) as ydl:
+                meta = ydl.extract_info(url, download=False)
+            if meta and meta.get("duration") and meta["duration"] > MAX_YOUTUBE_DURATION:
+                shutil.rmtree(download_dir, ignore_errors=True)
+                raise VideoDurationExceeded(int(meta["duration"]), MAX_YOUTUBE_DURATION)
+        except VideoDurationExceeded:
+            raise
+        except Exception:
+            pass  # If metadata fetch fails, proceed with normal download
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

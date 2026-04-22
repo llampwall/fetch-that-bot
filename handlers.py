@@ -6,21 +6,22 @@ from telegram import InputMediaPhoto, InputMediaVideo, Update
 from telegram.ext import ContextTypes
 
 from config import URL_PATTERNS, detect_platform
-from extractor import ExtractionResult, cleanup, extract_media
+from extractor import ExtractionResult, VideoDurationExceeded, cleanup, extract_media
 
 logger = logging.getLogger(__name__)
 
 
-def _build_attribution(user_name: str, platform: str, user_text: str | None, post_caption: str | None) -> str:
-    """Build the attribution caption: 'Name (via Platform): commentary or post caption'."""
-    header = f"{user_name} (via {platform})"
+def _build_attribution(user_name: str, platform: str, url: str, user_text: str | None, post_caption: str | None) -> str:
+    """Build the attribution caption: 'Name [Platform]: commentary or post caption'."""
+    from html import escape
+    header = f'{escape(user_name)} [<a href="{escape(url)}">{escape(platform)}</a>]'
 
     # User's own text around the link takes priority
     if user_text and user_text.strip():
-        return f"{header}: {user_text.strip()}"
+        return f"{header}: {escape(user_text.strip())}"
     # Fall back to the post's original caption
     if post_caption and post_caption.strip():
-        return f"{header}: {post_caption.strip()}"
+        return f"{header}: {escape(post_caption.strip())}"
     return header
 
 
@@ -57,6 +58,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 all_succeeded = False
                 logger.warning("No media extracted from %s", url)
+        except VideoDurationExceeded as e:
+            all_succeeded = False
+            mins = e.duration // 60
+            secs = e.duration % 60
+            logger.info("Skipped %s — too long (%dm%ds)", url, mins, secs)
+            await context.bot.send_message(
+                chat_id,
+                f"Skipped — that video is {mins}m{secs}s, max is {e.limit // 60}m.",
+                message_thread_id=thread_id,
+            )
         except Exception:
             all_succeeded = False
             logger.exception("Failed to extract media from %s", url)
@@ -80,7 +91,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Post each extraction result
     for url, result in results:
         platform = result.platform
-        caption = _build_attribution(user_name, platform, user_text, result.caption)
+        caption = _build_attribution(user_name, platform, url, user_text, result.caption)
         # Telegram caption limit is 1024 chars
         if len(caption) > 1024:
             caption = caption[:1021] + "..."
@@ -94,6 +105,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             chat_id,
                             video=f,
                             caption=caption,
+                            parse_mode="HTML",
                             supports_streaming=True,
                             width=item.width,
                             height=item.height,
@@ -103,6 +115,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     else:
                         await context.bot.send_photo(
                             chat_id, photo=f, caption=caption,
+                            parse_mode="HTML",
                             message_thread_id=thread_id,
                         )
 
@@ -114,17 +127,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     fh = open(item.file_path, "rb")
                     file_handles.append(fh)
                     item_caption = caption if i == 0 else None
+                    item_parse_mode = "HTML" if i == 0 else None
                     if item.media_type == "video":
                         media_group.append(InputMediaVideo(
                             media=fh,
                             caption=item_caption,
+                            parse_mode=item_parse_mode,
                             supports_streaming=True,
                             width=item.width,
                             height=item.height,
                             duration=item.duration,
                         ))
                     else:
-                        media_group.append(InputMediaPhoto(media=fh, caption=item_caption))
+                        media_group.append(InputMediaPhoto(
+                            media=fh, caption=item_caption,
+                            parse_mode=item_parse_mode,
+                        ))
 
                 await context.bot.send_media_group(
                     chat_id, media=media_group,

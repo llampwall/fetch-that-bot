@@ -15,6 +15,9 @@ COOKIES_FILE = os.environ.get("FETCH_COOKIES_FILE", os.path.join(os.path.dirname
 # Max file size Telegram bots can upload (50MB)
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
+# Max video duration in seconds for YouTube downloads (0 = no limit)
+MAX_YOUTUBE_DURATION = int(os.environ.get("FETCH_MAX_YT_DURATION", "300"))  # 5 minutes
+
 # URL patterns for supported platforms
 URL_PATTERNS = re.compile(
     r"https?://(?:www\.)?"
