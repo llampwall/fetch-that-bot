@@ -48,6 +48,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Process each URL
     results: list[tuple[str, ExtractionResult]] = []
     all_succeeded = True
+    skipped = 0
 
     for url in urls:
         platform = detect_platform(url)
@@ -59,7 +60,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 all_succeeded = False
                 logger.warning("No media extracted from %s", url)
         except VideoDurationExceeded as e:
-            all_succeeded = False
+            skipped += 1
             mins = e.duration // 60
             secs = e.duration % 60
             logger.info("Skipped %s — too long (%dm%ds)", url, mins, secs)
@@ -73,12 +74,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Failed to extract media from %s", url)
 
     if not results:
-        # Everything failed — reply with error, don't delete original
-        await context.bot.send_message(
-            chat_id,
-            "Couldn't fetch this one — link might be private or down.",
-            message_thread_id=thread_id,
-        )
+        if not skipped:
+            # Everything genuinely failed — reply with error
+            await context.bot.send_message(
+                chat_id,
+                "Couldn't fetch this one — link might be private or down.",
+                message_thread_id=thread_id,
+            )
         return
 
     # Delete original message (only if we have at least one success)
