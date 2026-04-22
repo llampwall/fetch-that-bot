@@ -24,6 +24,23 @@ Python 3
 python main.py          # Start the bot (requires .env)
 ```
 
+## Service Management
+
+fetch-bot runs as a native Windows service via NSSM — **not PM2**. It is fully decoupled from AllMind's PM2 lifecycle.
+
+```powershell
+nssm status fetch-bot    # Check if running
+nssm restart fetch-bot   # Restart the service
+nssm stop fetch-bot      # Stop
+nssm start fetch-bot     # Start
+Get-Service fetch-bot    # Standard Windows service query
+```
+
+- Auto-starts on boot, auto-restarts on crash (5s delay)
+- Logs: `P:\software\fetch\logs\out.log` and `error.log`
+- Install script: `install-service.ps1` (run as admin to recreate)
+- **Do NOT add fetch-bot back to PM2** — that coupling caused repeated outages
+
 ## Architecture
 
 - **Webhook server**: `python-telegram-bot[webhooks]` runs tornado on port 8443
@@ -56,3 +73,6 @@ Chinvex repos use structured memory files in `docs/memory/`:
 - Do not re-enable `writethumbnail` (creates duplicate files)
 - Ask before adding dependencies
 - When opening a repo, check if brief shows "ACTION REQUIRED" - if so, offer to run `/update-memory`
+
+
+Before searching for files with Glob/Grep, check docs/sys/lookup.json — a concept-to-files index. If your search term matches a key, you already know which files to read.
