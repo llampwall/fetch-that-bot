@@ -143,7 +143,15 @@ def main() -> None:
     tornado.ioloop.PeriodicCallback(cleanup_old_files, 60_000).start()
 
     # Start the Telegram bot webhook (blocking — starts the tornado IOLoop)
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .connect_timeout(20)
+        .read_timeout(60)
+        .write_timeout(120)
+        .media_write_timeout(180)
+        .build()
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot webhook: %s (port %d)", WEBHOOK_URL, WEBHOOK_PORT)

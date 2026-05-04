@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from telegram import InputMediaPhoto, InputMediaVideo, Update
 from telegram.ext import ContextTypes
@@ -10,18 +11,50 @@ from extractor import ExtractionResult, VideoDurationExceeded, cleanup, extract_
 
 logger = logging.getLogger(__name__)
 
+_GENERIC_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+_MAX_CAPTION_CHARS = 225
+_ELLIPSIS = "..."
+_CAPTION_SEPARATOR = " - "
+
+
+def _first_name(user_name: str) -> str:
+    """Return the first display-name token."""
+    name = (user_name or "").strip()
+    if not name:
+        return "Someone"
+    return name.split()[0]
+
+
+def _strip_embedded_urls(text: str) -> str:
+    """Remove source URLs from captions that already have a linked header."""
+    return _GENERIC_URL_PATTERN.sub("", text).strip()
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= len(_ELLIPSIS):
+        return _ELLIPSIS[:limit]
+    return text[:limit - len(_ELLIPSIS)] + _ELLIPSIS
+
 
 def _build_attribution(user_name: str, platform: str, url: str, user_text: str | None, post_caption: str | None) -> str:
-    """Build the attribution caption: 'Name [Platform]: commentary or post caption'."""
+    """Build the attribution caption: 'First [Platform] - commentary or post caption'."""
     from html import escape
-    header = f'{escape(user_name)} [<a href="{escape(url)}">{escape(platform)}</a>]'
+    name = _first_name(user_name)
+    visible_header = f"{name} [{platform}]"
+    header = f'{escape(name)} [<a href="{escape(url)}">{escape(platform)}</a>]'
 
     # User's own text around the link takes priority
     if user_text and user_text.strip():
-        return f"{header}: {escape(user_text.strip())}"
+        body = user_text.strip()
+        body_limit = _MAX_CAPTION_CHARS - len(visible_header) - len(_CAPTION_SEPARATOR)
+        return f"{header}{_CAPTION_SEPARATOR}{escape(_truncate_text(body, body_limit))}"
     # Fall back to the post's original caption
-    if post_caption and post_caption.strip():
-        return f"{header}: {escape(post_caption.strip())}"
+    cleaned_caption = _strip_embedded_urls(post_caption or "")
+    if cleaned_caption:
+        body_limit = _MAX_CAPTION_CHARS - len(visible_header) - len(_CAPTION_SEPARATOR)
+        return f"{header}{_CAPTION_SEPARATOR}{escape(_truncate_text(cleaned_caption, body_limit))}"
     return header
 
 
@@ -47,7 +80,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Process each URL
     results: list[tuple[str, ExtractionResult]] = []
-    all_succeeded = True
     skipped = 0
 
     for url in urls:
@@ -57,7 +89,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if result.items:
                 results.append((url, result))
             else:
-                all_succeeded = False
                 logger.warning("No media extracted from %s", url)
         except VideoDurationExceeded as e:
             skipped += 1
@@ -70,7 +101,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 message_thread_id=thread_id,
             )
         except Exception:
-            all_succeeded = False
             logger.exception("Failed to extract media from %s", url)
 
     if not results:
@@ -83,14 +113,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         return
 
-    # Delete original message (only if we have at least one success)
-    try:
-        await message.delete()
-    except Exception:
-        # Bot might not have admin rights — continue anyway
-        logger.warning("Could not delete original message in chat %s", chat_id)
+    # Post each extraction result FIRST — only delete the original after we've
+    # successfully replaced it, so a failed upload doesn't leave the link gone.
+    sent_any = False
+    send_failures: list[str] = []
 
-    # Post each extraction result
     for url, result in results:
         platform = result.platform
         caption = _build_attribution(user_name, platform, url, user_text, result.caption)
@@ -154,15 +181,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 for fh in file_handles:
                     fh.close()
 
+            sent_any = True
+
         except Exception:
             logger.exception("Failed to send media for %s", url)
+            send_failures.append(url)
         finally:
             cleanup(result)
 
-    # If some URLs failed, note it
-    if not all_succeeded:
-        failed_count = len(urls) - len(results)
+    # Only delete the original after at least one successful repost — otherwise
+    # the user is left with a deleted link and no replacement.
+    if sent_any:
+        try:
+            await message.delete()
+        except Exception:
+            logger.warning("Could not delete original message in chat %s", chat_id)
+
+    # If some URLs failed extraction OR upload, note it
+    failed_count = (len(urls) - len(results) - skipped) + len(send_failures)
+    if failed_count > 0:
         await context.bot.send_message(
             chat_id,
             f"Heads up: {failed_count} link(s) couldn't be fetched — might be private or down.",
+            message_thread_id=thread_id,
         )

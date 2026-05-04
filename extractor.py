@@ -40,6 +40,21 @@ class ExtractionResult:
     thumbnail: str | None = None
 
 
+def _apply_metadata(result: ExtractionResult, info: dict | None) -> None:
+    if not info:
+        return
+
+    caption = (
+        info.get("description")
+        or info.get("title")
+        or info.get("fulltitle")
+    )
+    if caption:
+        result.caption = caption
+    if info.get("thumbnail"):
+        result.thumbnail = info.get("thumbnail")
+
+
 def _is_image(path: Path) -> bool:
     return path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -205,15 +220,25 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
         ydl_opts["cookiefile"] = COOKIES_FILE
 
     result = ExtractionResult(platform=platform)
+    metadata = None
+
+    try:
+        with yt_dlp.YoutubeDL({**ydl_opts, "quiet": True}) as ydl:
+            metadata = ydl.extract_info(url, download=False)
+        _apply_metadata(result, metadata)
+    except Exception:
+        pass
 
     # Pre-download duration check for YouTube
     if platform == "YouTube" and MAX_YOUTUBE_DURATION > 0:
         try:
-            with yt_dlp.YoutubeDL({**ydl_opts, "quiet": True}) as ydl:
-                meta = ydl.extract_info(url, download=False)
-            if meta and meta.get("duration") and meta["duration"] > MAX_YOUTUBE_DURATION:
+            if metadata is None:
+                with yt_dlp.YoutubeDL({**ydl_opts, "quiet": True}) as ydl:
+                    metadata = ydl.extract_info(url, download=False)
+                _apply_metadata(result, metadata)
+            if metadata and metadata.get("duration") and metadata["duration"] > MAX_YOUTUBE_DURATION:
                 shutil.rmtree(download_dir, ignore_errors=True)
-                raise VideoDurationExceeded(int(meta["duration"]), MAX_YOUTUBE_DURATION)
+                raise VideoDurationExceeded(int(metadata["duration"]), MAX_YOUTUBE_DURATION)
         except VideoDurationExceeded:
             raise
         except Exception:
@@ -226,16 +251,7 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
         if info is None:
             return result
 
-        # Extract caption and thumbnail from metadata
-        result.caption = (
-            info.get("description")
-            or info.get("title")
-            or info.get("fulltitle")
-        )
-        result.thumbnail = info.get("thumbnail")
-        # Keep post captions short — just enough context, not the whole essay
-        if result.caption and len(result.caption) > 200:
-            result.caption = result.caption[:200] + "..."
+        _apply_metadata(result, info)
 
         # Collect downloaded files
         files = _collect_files(download_dir)
