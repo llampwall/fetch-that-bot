@@ -147,7 +147,7 @@ def main() -> None:
         Application.builder()
         .token(BOT_TOKEN)
         .connect_timeout(20)
-        .read_timeout(60)
+        .read_timeout(180)
         .write_timeout(120)
         .media_write_timeout(180)
         .build()
