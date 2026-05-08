@@ -63,10 +63,51 @@ def _strip_urls(text: str) -> str:
     return URL_PATTERNS.sub("", text).strip()
 
 
+def _format_skip_message(prefix: str, url: str, caption: str | None) -> str:
+    """Build a `<prefix>: <caption>\\n<url>` message in plain text.
+
+    The URL is plain (not a text_link entity) so it's visible and copyable.
+    Bot messages are filtered out at the top of `handle_message`, so a plain
+    URL won't re-trigger extraction; `disable_web_page_preview=True` on the
+    send call suppresses the unfurl.
+    """
+    body = (caption or "").strip()
+    if body:
+        body = _truncate_text(body, 200)
+        return f"{prefix}: {body}\n{url}"
+    return f"{prefix}\n{url}"
+
+
+async def _post_failure(context, chat_id, thread_id, user_name, url, user_text, post_caption):
+    """Post a 'couldn't fetch' fallback that preserves the user's link + context.
+
+    Caption priority: user's own commentary first, otherwise the post's caption
+    if extraction got far enough to retrieve it.
+    """
+    name = _first_name(user_name)
+    platform = detect_platform(url)
+    caption = (user_text or "").strip() or _strip_embedded_urls(post_caption or "")
+    prefix = f"Couldn't fetch — {name} [{platform}]"
+    text = _format_skip_message(prefix, url, caption)
+    try:
+        await context.bot.send_message(
+            chat_id,
+            text,
+            disable_web_page_preview=True,
+            message_thread_id=thread_id,
+        )
+    except Exception:
+        logger.exception("Failed to post failure fallback for %s", url)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle an incoming message — detect links, extract media, repost inline."""
     message = update.effective_message
     if not message or not message.text:
+        return
+
+    # Defensive: never react to bot messages (including our own fallbacks).
+    if message.from_user and message.from_user.is_bot:
         return
 
     urls = URL_PATTERNS.findall(message.text)
@@ -78,47 +119,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_name = message.from_user.first_name if message.from_user else "Someone"
     user_text = _strip_urls(message.text)
 
-    # Process each URL
-    results: list[tuple[str, ExtractionResult]] = []
-    skipped = 0
+    # Delete the original immediately so the chat doesn't sit with a stale link
+    # while we extract/compress/upload. Failures get re-posted as a "couldn't
+    # fetch" fallback that preserves the link + commentary.
+    try:
+        await message.delete()
+    except Exception:
+        logger.warning("Could not delete original message in chat %s", chat_id)
+
+    # Process each URL — extract, then send. Failures (any reason) fall through
+    # to a per-URL fallback message at the end. Each failed entry carries the
+    # post caption (when extraction got far enough to retrieve one) so the
+    # fallback message can include it.
+    extractions: list[tuple[str, ExtractionResult]] = []
+    failed_urls: list[tuple[str, str | None]] = []
 
     for url in urls:
         platform = detect_platform(url)
         try:
             result = extract_media(url, platform)
             if result.items:
-                results.append((url, result))
+                extractions.append((url, result))
             else:
                 logger.warning("No media extracted from %s", url)
+                failed_urls.append((url, result.caption))
         except VideoDurationExceeded as e:
-            skipped += 1
             mins = e.duration // 60
             secs = e.duration % 60
             logger.info("Skipped %s — too long (%dm%ds)", url, mins, secs)
-            await context.bot.send_message(
-                chat_id,
-                f"Skipped — that video is {mins}m{secs}s, max is {e.limit // 60}m.",
-                message_thread_id=thread_id,
-            )
+            name = _first_name(user_name)
+            prefix = f"{name} [too long, {mins}m{secs:02d}s]"
+            caption = (user_text or "").strip() or (e.title or "")
+            text = _format_skip_message(prefix, url, caption)
+            try:
+                await context.bot.send_message(
+                    chat_id,
+                    text,
+                    disable_web_page_preview=True,
+                    message_thread_id=thread_id,
+                )
+            except Exception:
+                logger.exception("Failed to post too-long fallback for %s", url)
         except Exception:
             logger.exception("Failed to extract media from %s", url)
+            failed_urls.append((url, None))
 
-    if not results:
-        if not skipped:
-            # Everything genuinely failed — reply with error
-            await context.bot.send_message(
-                chat_id,
-                "Couldn't fetch this one — link might be private or down.",
-                message_thread_id=thread_id,
-            )
-        return
-
-    # Post each extraction result FIRST — only delete the original after we've
-    # successfully replaced it, so a failed upload doesn't leave the link gone.
-    sent_any = False
-    send_failures: list[str] = []
-
-    for url, result in results:
+    # Send each successful extraction
+    for url, result in extractions:
         platform = result.platform
         caption = _build_attribution(user_name, platform, url, user_text, result.caption)
         # Telegram caption limit is 1024 chars
@@ -181,27 +228,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 for fh in file_handles:
                     fh.close()
 
-            sent_any = True
-
         except Exception:
             logger.exception("Failed to send media for %s", url)
-            send_failures.append(url)
+            failed_urls.append((url, result.caption))
         finally:
             cleanup(result)
 
-    # Only delete the original after at least one successful repost — otherwise
-    # the user is left with a deleted link and no replacement.
-    if sent_any:
-        try:
-            await message.delete()
-        except Exception:
-            logger.warning("Could not delete original message in chat %s", chat_id)
-
-    # If some URLs failed extraction OR upload, note it
-    failed_count = (len(urls) - len(results) - skipped) + len(send_failures)
-    if failed_count > 0:
-        await context.bot.send_message(
-            chat_id,
-            f"Heads up: {failed_count} link(s) couldn't be fetched — might be private or down.",
-            message_thread_id=thread_id,
-        )
+    # Per-URL fallback for anything we couldn't deliver — preserves the link
+    # and the user's commentary so the message isn't a black hole.
+    for url, post_caption in failed_urls:
+        await _post_failure(context, chat_id, thread_id, user_name, url, user_text, post_caption)

@@ -17,9 +17,10 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 class VideoDurationExceeded(Exception):
     """Raised when a video exceeds the configured max duration."""
-    def __init__(self, duration: int, limit: int):
+    def __init__(self, duration: int, limit: int, title: str | None = None):
         self.duration = duration
         self.limit = limit
+        self.title = title
         super().__init__(f"Video is {duration}s, limit is {limit}s")
 
 
@@ -105,13 +106,53 @@ def _needs_reencode(info: dict) -> bool:
     return False
 
 
+_AUDIO_BITRATE_KBPS = 128
+_COMPRESS_HEADROOM_BYTES = 3 * 1024 * 1024  # leave ~3MB under the cap for mux overhead
+
+
+def _compress_cmd(src: Path, dst: Path, info: dict, target_bytes: int, max_dim: int) -> tuple[list[str], int, float]:
+    """Build an ffmpeg command targeting `target_bytes` total output.
+
+    Returns (command, video_bitrate_bps, duration_seconds) for logging.
+    """
+    duration = max(float(info.get("duration") or 600), 1.0)
+    audio_bytes = int(_AUDIO_BITRATE_KBPS * 1000 / 8 * duration)
+    video_budget = max(target_bytes - audio_bytes - _COMPRESS_HEADROOM_BYTES, 256 * 1024)
+    video_bitrate = int(video_budget * 8 / duration)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", f"{_AUDIO_BITRATE_KBPS}k",
+        "-movflags", "+faststart",
+        "-b:v", str(video_bitrate),
+        "-maxrate", str(video_bitrate),
+        # bufsize=bitrate gives ffmpeg a tight rate-control window; doubling
+        # bufsize loosens the cap and is a common cause of overshoot. Keep it
+        # equal to bitrate for predictable output size.
+        "-bufsize", str(max(video_bitrate, 1)),
+        "-vf",
+        f"scale='min({max_dim},iw)':'min({max_dim},ih)':force_original_aspect_ratio=decrease,setsar=1",
+        # Hard size cap: ffmpeg stops writing once the file hits this size.
+        # Output will be truncated if hit, but at least the file is sendable.
+        "-fs", str(MAX_UPLOAD_BYTES - _COMPRESS_HEADROOM_BYTES),
+        str(dst),
+    ]
+    return cmd, video_bitrate, duration
+
+
 def _prepare_video(path: Path) -> tuple[Path, dict | None]:
     """Ensure a video is iOS-compatible and under Telegram's size limit.
 
     Re-encodes to H.264/AAC/yuv420p with square pixels if the codec is wrong,
-    the pixel format is wrong, or the file is too large. Returns the final path
-    and its probe info.
+    the pixel format is wrong, or the file is too large. If a single compression
+    pass overshoots the size cap, retries with a lower bitrate / smaller frame.
+    Returns the final path and its probe info; the caller is responsible for
+    checking the final size against `MAX_UPLOAD_BYTES`.
     """
+    import logging as _log
+    log = _log.getLogger(__name__)
+
     info = _probe_video(path)
     if info is None:
         return path, None
@@ -124,38 +165,57 @@ def _prepare_video(path: Path) -> tuple[Path, dict | None]:
         return path, info
 
     out = path.with_name(path.stem + "_enc.mp4")
-    cmd = [
-        "ffmpeg", "-y", "-i", str(path),
-        "-c:v", "libx264", "-preset", "fast",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
-        "-movflags", "+faststart",
-    ]
-    if needs_compress:
-        # Size-targeted: scale to 720p max and target 45MB for headroom
-        target_bytes = 45 * 1024 * 1024
-        duration = info.get("duration") or 60
-        target_bitrate = int((target_bytes * 8) / duration)
-        cmd += [
-            "-b:v", str(target_bitrate),
-            "-maxrate", str(target_bitrate),
-            "-bufsize", str(target_bitrate // 2),
-            "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,setsar=1",
-        ]
-    else:
+
+    if not needs_compress:
         # Quality-targeted: original resolution, CRF 23
-        cmd += ["-crf", "23", "-vf", "setsar=1"]
-    cmd.append(str(out))
+        cmd = [
+            "ffmpeg", "-y", "-i", str(path),
+            "-c:v", "libx264", "-preset", "fast",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", f"{_AUDIO_BITRATE_KBPS}k",
+            "-movflags", "+faststart",
+            "-crf", "23", "-vf", "setsar=1",
+            str(out),
+        ]
+        subprocess.run(cmd, capture_output=True, timeout=600, creationflags=_NO_WINDOW)
+        if out.exists() and out.stat().st_size > 0:
+            return out, _probe_video(out) or info
+        return path, info
 
-    subprocess.run(cmd, capture_output=True, timeout=600, creationflags=_NO_WINDOW)
+    # Size-targeted with progressive fallback. Each pass picks a tighter
+    # byte budget and a smaller frame in case the previous overshot.
+    passes = [
+        (35 * 1024 * 1024, 1280),
+        (25 * 1024 * 1024, 960),
+        (15 * 1024 * 1024, 720),
+    ]
+    log.info(
+        "Compressing %s: %d MB, duration=%.1fs, codec=%s",
+        path.name, size // (1024 * 1024),
+        float(info.get("duration") or 0), info.get("vcodec"),
+    )
+    for target_bytes, max_dim in passes:
+        cmd, vbr, dur = _compress_cmd(path, out, info, target_bytes, max_dim)
+        proc = subprocess.run(
+            cmd, capture_output=True, timeout=600, creationflags=_NO_WINDOW,
+        )
+        produced = out.stat().st_size if out.exists() else 0
+        log.info(
+            "Pass target=%d MB max_dim=%d vbr=%d kbps dur=%.1fs -> %d MB (rc=%d)",
+            target_bytes // (1024 * 1024), max_dim,
+            vbr // 1000, dur, produced // (1024 * 1024), proc.returncode,
+        )
+        if proc.returncode != 0:
+            stderr_tail = (proc.stderr or b"").decode("utf-8", "replace")[-500:]
+            log.warning("ffmpeg pass failed (rc=%d): %s", proc.returncode, stderr_tail)
+            continue
+        if produced > 0 and produced < MAX_UPLOAD_BYTES:
+            return out, _probe_video(out) or info
+        # else: fall through and try a tighter pass
 
+    # All passes failed to fit — return whatever we have; caller will reject.
     if out.exists() and out.stat().st_size > 0:
-        new_info = _probe_video(out) or info
-        if not needs_compress or out.stat().st_size < MAX_UPLOAD_BYTES:
-            return out, new_info
-        # Re-encode didn't get us under the limit — still return it, caller decides
-        return out, new_info
-
+        return out, _probe_video(out) or info
     return path, info
 
 
@@ -201,10 +261,15 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
         "no_warnings": True,
         # Prefer mp4 container for video
         "merge_output_format": "mp4",
-        # Prefer H.264 (avc1) explicitly — iOS Telegram can't decode AV1 or VP9
+        # Prefer H.264 (avc1) explicitly — iOS Telegram can't decode AV1 or VP9.
+        # Cap height at 720p so we don't pull a 1080p60 source we'd just have to
+        # downscale anyway (TikTok in particular ships ~150MB 1080p60 streams).
         "format": (
-            "bv*[vcodec^=avc1]+ba[acodec^=mp4a]"
+            "bv*[vcodec^=avc1][height<=720]+ba[acodec^=mp4a]"
+            "/bv*[vcodec^=avc1][height<=720]+ba"
+            "/bv*[vcodec^=avc1]+ba[acodec^=mp4a]"
             "/bv*[vcodec^=avc1]+ba"
+            "/b[vcodec^=avc1][height<=720]"
             "/b[vcodec^=avc1]"
             "/b[ext=mp4]"
             "/b"
@@ -238,7 +303,11 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
                 _apply_metadata(result, metadata)
             if metadata and metadata.get("duration") and metadata["duration"] > MAX_YOUTUBE_DURATION:
                 shutil.rmtree(download_dir, ignore_errors=True)
-                raise VideoDurationExceeded(int(metadata["duration"]), MAX_YOUTUBE_DURATION)
+                raise VideoDurationExceeded(
+                    int(metadata["duration"]),
+                    MAX_YOUTUBE_DURATION,
+                    title=metadata.get("title") or metadata.get("fulltitle"),
+                )
         except VideoDurationExceeded:
             raise
         except Exception:
@@ -262,9 +331,19 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
                 if sub.is_dir():
                     files.extend(_collect_files(str(sub)))
 
+        import logging as _log
+        log = _log.getLogger(__name__)
+        ytdlp_produced_files = bool(files)
         for f in files[:10]:  # Telegram album max is 10
             if _is_video(f):
                 f, vinfo = _prepare_video(f)
+                if f.exists() and f.stat().st_size > MAX_UPLOAD_BYTES:
+                    log.warning(
+                        "Skipping %s — still %d MB after compression (cap %d MB)",
+                        f.name, f.stat().st_size // (1024 * 1024),
+                        MAX_UPLOAD_BYTES // (1024 * 1024),
+                    )
+                    continue
                 result.items.append(MediaItem(
                     file_path=f,
                     media_type="video",
@@ -274,6 +353,10 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
                 ))
             elif _is_image(f):
                 result.items.append(MediaItem(file_path=f, media_type="photo"))
+        # If yt-dlp produced files but every one was too big to send, don't
+        # waste time re-downloading the same thing via gallery-dl.
+        if ytdlp_produced_files and not result.items:
+            return result
 
     except Exception:
         # yt-dlp failed — will try gallery-dl fallback below
