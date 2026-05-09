@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from html import escape
 
 from telegram import InputMediaPhoto, InputMediaVideo, Update
 from telegram.ext import ContextTypes
@@ -12,6 +13,8 @@ from extractor import ExtractionResult, VideoDurationExceeded, cleanup, extract_
 logger = logging.getLogger(__name__)
 
 _GENERIC_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+_URL_TRAILING_PUNCT = ".,;:!?)\"']>"
+_LINK_LABEL = "link"
 _MAX_CAPTION_CHARS = 225
 _ELLIPSIS = "..."
 _CAPTION_SEPARATOR = " - "
@@ -26,7 +29,13 @@ def _first_name(user_name: str) -> str:
 
 
 def _strip_embedded_urls(text: str) -> str:
-    """Remove source URLs from captions that already have a linked header."""
+    """Remove source URLs from plain-text fallback messages.
+
+    Used only on the failure path where the original URL is shown on its own
+    line — embedded t.co/quote-tweet URLs would just be visual noise there.
+    The success-path caption uses `_format_caption_body` instead, which keeps
+    URLs as clean linked text.
+    """
     return _GENERIC_URL_PATTERN.sub("", text).strip()
 
 
@@ -38,23 +47,81 @@ def _truncate_text(text: str, limit: int) -> str:
     return text[:limit - len(_ELLIPSIS)] + _ELLIPSIS
 
 
+def _format_caption_body(text: str, limit: int) -> str:
+    """Build an HTML caption body: escape text, replace each URL with
+    `<a href="URL">link</a>`. Truncates by visible character count so the
+    rendered message stays under `limit` characters in the chat UI.
+
+    URL anchor tags count as `len(_LINK_LABEL)` visible characters; t.co and
+    other embedded URLs in social captions become tidy "link" links instead
+    of long bare strings.
+    """
+    text = (text or "").strip()
+    if not text or limit <= 0:
+        return ""
+
+    pieces: list[str] = []
+    visible = 0
+    cursor = 0
+
+    def append_plain(seg: str) -> bool:
+        """Escape and append a plain segment. Returns False if the limit was
+        hit and the caller should stop emitting further pieces."""
+        nonlocal visible
+        if not seg:
+            return True
+        room = limit - visible
+        if len(seg) <= room:
+            pieces.append(escape(seg))
+            visible += len(seg)
+            return visible < limit
+        keep = max(room - len(_ELLIPSIS), 0)
+        pieces.append(escape(seg[:keep]) + _ELLIPSIS[:room])
+        visible = limit
+        return False
+
+    for m in _GENERIC_URL_PATTERN.finditer(text):
+        if m.start() > cursor:
+            if not append_plain(text[cursor:m.start()]):
+                return "".join(pieces)
+        url = m.group(0).rstrip(_URL_TRAILING_PUNCT)
+        cursor = m.start() + len(url)
+        room = limit - visible
+        if room <= 0:
+            break
+        if len(_LINK_LABEL) > room:
+            pieces.append(_ELLIPSIS[:room])
+            visible = limit
+            return "".join(pieces)
+        pieces.append(f'<a href="{escape(url, quote=True)}">{_LINK_LABEL}</a>')
+        visible += len(_LINK_LABEL)
+
+    if cursor < len(text) and visible < limit:
+        append_plain(text[cursor:])
+
+    return "".join(pieces)
+
+
 def _build_attribution(user_name: str, platform: str, url: str, user_text: str | None, post_caption: str | None) -> str:
-    """Build the attribution caption: 'First [Platform] - commentary or post caption'."""
-    from html import escape
+    """Build the attribution caption: 'First [Platform] - commentary or post caption'.
+
+    URLs inside user_text or post_caption are kept as clean `<a>link</a>`
+    anchors so captions stay readable instead of being polluted with bare
+    t.co URLs from quote-RTs and similar.
+    """
     name = _first_name(user_name)
     visible_header = f"{name} [{platform}]"
-    header = f'{escape(name)} [<a href="{escape(url)}">{escape(platform)}</a>]'
+    header = f'{escape(name)} [<a href="{escape(url, quote=True)}">{escape(platform)}</a>]'
+    body_limit = _MAX_CAPTION_CHARS - len(visible_header) - len(_CAPTION_SEPARATOR)
 
     # User's own text around the link takes priority
-    if user_text and user_text.strip():
-        body = user_text.strip()
-        body_limit = _MAX_CAPTION_CHARS - len(visible_header) - len(_CAPTION_SEPARATOR)
-        return f"{header}{_CAPTION_SEPARATOR}{escape(_truncate_text(body, body_limit))}"
+    body = _format_caption_body(user_text or "", body_limit)
+    if body:
+        return f"{header}{_CAPTION_SEPARATOR}{body}"
     # Fall back to the post's original caption
-    cleaned_caption = _strip_embedded_urls(post_caption or "")
-    if cleaned_caption:
-        body_limit = _MAX_CAPTION_CHARS - len(visible_header) - len(_CAPTION_SEPARATOR)
-        return f"{header}{_CAPTION_SEPARATOR}{escape(_truncate_text(cleaned_caption, body_limit))}"
+    body = _format_caption_body(post_caption or "", body_limit)
+    if body:
+        return f"{header}{_CAPTION_SEPARATOR}{body}"
     return header
 
 
