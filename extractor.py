@@ -250,6 +250,30 @@ def _gallery_dl_fallback(url: str, download_dir: str) -> list[Path]:
     return files
 
 
+def precheck_duration(url: str, platform: str) -> int | None:
+    """Return the duration (seconds) if the video exceeds the configured cap,
+    or None if it's under the cap, unknown, or not a duration-capped platform.
+
+    Currently only YouTube has a duration cap. Uses a metadata-only yt-dlp
+    call (no download) so the caller can decide whether to touch the original
+    message before paying for the full extract.
+    """
+    if platform != "YouTube" or MAX_YOUTUBE_DURATION <= 0:
+        return None
+    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    if os.path.isfile(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:
+        return None
+    duration = info.get("duration") if info else None
+    if duration and duration > MAX_YOUTUBE_DURATION:
+        return int(duration)
+    return None
+
+
 def extract_media(url: str, platform: str) -> ExtractionResult:
     """Download media from a URL using yt-dlp and return extracted items."""
     os.makedirs(TEMP_DIR, exist_ok=True)

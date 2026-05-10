@@ -8,7 +8,7 @@ from telegram import InputMediaPhoto, InputMediaVideo, Update
 from telegram.ext import ContextTypes
 
 from config import URL_PATTERNS, detect_platform
-from extractor import ExtractionResult, VideoDurationExceeded, cleanup, extract_media
+from extractor import ExtractionResult, VideoDurationExceeded, cleanup, extract_media, precheck_duration
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +185,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     thread_id = message.message_thread_id  # None unless in a forum topic/thread
     user_name = message.from_user.first_name if message.from_user else "Someone"
     user_text = _strip_urls(message.text)
+
+    # Metadata-only duration precheck. If any URL would exceed the cap, leave
+    # the original message untouched — silently skip the whole message rather
+    # than deleting it just to repost a "too long" notice. Keeps long-video
+    # links visible in their original form, no bot output at all.
+    for url in urls:
+        if precheck_duration(url, detect_platform(url)) is not None:
+            logger.info("Leaving message alone — %s exceeds duration cap", url)
+            return
 
     # Delete the original immediately so the chat doesn't sit with a stale link
     # while we extract/compress/upload. Failures get re-posted as a "couldn't
