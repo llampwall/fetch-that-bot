@@ -145,16 +145,20 @@ def _format_skip_message(prefix: str, url: str, caption: str | None) -> str:
     return f"{prefix}\n{url}"
 
 
-async def _post_failure(context, chat_id, thread_id, user_name, url, user_text, post_caption):
-    """Post a 'couldn't fetch' fallback that preserves the user's link + context.
+async def _post_failure(context, chat_id, thread_id, user_name, url, user_text, post_caption, *, oversize: bool = False):
+    """Post a fallback that preserves the user's link + context.
 
     Caption priority: user's own commentary first, otherwise the post's caption
-    if extraction got far enough to retrieve it.
+    if extraction got far enough to retrieve it. Uses "Too big to upload"
+    instead of "Couldn't fetch" when extraction succeeded but the video stayed
+    over the Telegram cap after compression — the link is technically fetchable,
+    just not deliverable inline.
     """
     name = _first_name(user_name)
     platform = detect_platform(url)
     caption = (user_text or "").strip() or _strip_embedded_urls(post_caption or "")
-    prefix = f"Couldn't fetch — {name} [{platform}]"
+    reason = "Too big to upload" if oversize else "Couldn't fetch"
+    prefix = f"{reason} — {name} [{platform}]"
     text = _format_skip_message(prefix, url, caption)
     try:
         await context.bot.send_message(
@@ -208,7 +212,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # post caption (when extraction got far enough to retrieve one) so the
     # fallback message can include it.
     extractions: list[tuple[str, ExtractionResult]] = []
-    failed_urls: list[tuple[str, str | None]] = []
+    # (url, post_caption, oversize) — oversize=True when extraction worked
+    # but every video stayed over the Telegram cap after compression, so the
+    # fallback can say "Too big to upload" instead of "Couldn't fetch".
+    failed_urls: list[tuple[str, str | None, bool]] = []
 
     for url in urls:
         platform = detect_platform(url)
@@ -218,7 +225,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 extractions.append((url, result))
             else:
                 logger.warning("No media extracted from %s", url)
-                failed_urls.append((url, result.caption))
+                failed_urls.append((url, result.caption, result.oversize))
         except VideoDurationExceeded as e:
             mins = e.duration // 60
             secs = e.duration % 60
@@ -238,7 +245,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.exception("Failed to post too-long fallback for %s", url)
         except Exception:
             logger.exception("Failed to extract media from %s", url)
-            failed_urls.append((url, None))
+            failed_urls.append((url, None, False))
 
     # Send each successful extraction
     for url, result in extractions:
@@ -306,11 +313,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         except Exception:
             logger.exception("Failed to send media for %s", url)
-            failed_urls.append((url, result.caption))
+            failed_urls.append((url, result.caption, False))
         finally:
             cleanup(result)
 
     # Per-URL fallback for anything we couldn't deliver — preserves the link
     # and the user's commentary so the message isn't a black hole.
-    for url, post_caption in failed_urls:
-        await _post_failure(context, chat_id, thread_id, user_name, url, user_text, post_caption)
+    for url, post_caption, oversize in failed_urls:
+        await _post_failure(
+            context, chat_id, thread_id, user_name, url, user_text, post_caption,
+            oversize=oversize,
+        )

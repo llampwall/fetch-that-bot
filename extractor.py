@@ -39,6 +39,10 @@ class ExtractionResult:
     caption: str | None = None
     platform: str = "Unknown"
     thumbnail: str | None = None
+    # True when at least one video was dropped because it stayed over the
+    # Telegram size cap even after compression. Lets handlers post an honest
+    # "too big" fallback instead of a generic "couldn't fetch".
+    oversize: bool = False
 
 
 def _apply_metadata(result: ExtractionResult, info: dict | None) -> None:
@@ -167,7 +171,7 @@ def _prepare_video(path: Path) -> tuple[Path, dict | None]:
     out = path.with_name(path.stem + "_enc.mp4")
 
     if not needs_compress:
-        # Quality-targeted: original resolution, CRF 23
+        # Quality-targeted: original resolution, CRF 23.
         cmd = [
             "ffmpeg", "-y", "-i", str(path),
             "-c:v", "libx264", "-preset", "fast",
@@ -179,8 +183,19 @@ def _prepare_video(path: Path) -> tuple[Path, dict | None]:
         ]
         subprocess.run(cmd, capture_output=True, timeout=600, creationflags=_NO_WINDOW)
         if out.exists() and out.stat().st_size > 0:
-            return out, _probe_video(out) or info
-        return path, info
+            # A small source can balloon under CRF 23 (HEVC TikToks are the
+            # canonical case — 18 MB in, 60 MB out at 1080p). If the quality
+            # pass overshoots the cap, fall through to the size-targeted
+            # ladder instead of trusting the bloated output.
+            if out.stat().st_size <= MAX_UPLOAD_BYTES:
+                return out, _probe_video(out) or info
+            log.info(
+                "CRF re-encode overshot (%d MB > cap), falling through to size-targeted passes",
+                out.stat().st_size // (1024 * 1024),
+            )
+            info = _probe_video(out) or info
+        else:
+            return path, info
 
     # Size-targeted with progressive fallback. Each pass picks a tighter
     # byte budget and a smaller frame in case the previous overshot.
@@ -367,6 +382,7 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
                         f.name, f.stat().st_size // (1024 * 1024),
                         MAX_UPLOAD_BYTES // (1024 * 1024),
                     )
+                    result.oversize = True
                     continue
                 result.items.append(MediaItem(
                     file_path=f,
