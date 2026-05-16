@@ -170,7 +170,13 @@ def _prepare_video(path: Path) -> tuple[Path, dict | None]:
 
     out = path.with_name(path.stem + "_enc.mp4")
 
-    if not needs_compress:
+    # HEVC sources reliably balloon under CRF 23 H.264 at the same resolution
+    # (2-3x growth is typical), so the CRF pass is wasted work that gets
+    # discarded by the overshoot check below. Skip straight to the size-
+    # targeted ladder for HEVC.
+    skip_crf = info.get("vcodec") in ("hevc", "h265")
+
+    if not needs_compress and not skip_crf:
         # Quality-targeted: original resolution, CRF 23.
         cmd = [
             "ffmpeg", "-y", "-i", str(path),

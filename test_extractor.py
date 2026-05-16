@@ -75,37 +75,24 @@ class ExtractMediaTests(unittest.TestCase):
 
 
 class PrepareVideoTests(unittest.TestCase):
-    """The 'small HEVC source ballooned under CRF 23' regression — TikTok ships
-    18 MB HEVC clips that our codec-fix pass re-encodes to ~60 MB at 1080p. The
-    CRF path must fall through to the size-targeted ladder if its output
-    overshoots `MAX_UPLOAD_BYTES`, not return the bloated file.
+    """Compression-path regressions — see `_prepare_video`.
+
+    HEVC sources skip the CRF pass entirely (they reliably balloon 2-3x under
+    CRF 23 H.264 at the same resolution, so the pass would just be discarded
+    by the overshoot check). Other non-H.264 codecs still get the CRF pass
+    with a fall-through to the size-targeted ladder on overshoot.
     """
 
-    def test_crf_overshoot_falls_through_to_size_targeted_passes(self):
-        src = Path("/tmp/fake_source.mp4")
+    def _run(self, src, probe_info, stat_for_out):
         produced_out = src.with_name(src.stem + "_enc.mp4")
-
-        probe_info = {
-            "vcodec": "hevc",  # triggers needs_reencode
-            "width": 1080, "height": 1920,
-            "pix_fmt": "yuv420p", "sar": "1:1",
-            "duration": 240.0,
-        }
-
-        # 18 MB source (under cap → needs_reencode only, not needs_compress)
         src_stat = type("S", (), {"st_size": 18 * 1024 * 1024})()
-        # First CRF pass overshoots at 60 MB; ladder passes land at 30 MB.
-        crf_stat = type("S", (), {"st_size": 60 * 1024 * 1024})()
-        ladder_stat = type("S", (), {"st_size": 30 * 1024 * 1024})()
         stat_calls = []
 
         def fake_stat(self):
             stat_calls.append(str(self))
             if str(self) == str(src):
                 return src_stat
-            # First time we look at the encoded output it's the CRF result;
-            # after the size-targeted pass runs it's the smaller ladder result.
-            return crf_stat if stat_calls.count(str(produced_out)) <= 2 else ladder_stat
+            return stat_for_out(stat_calls.count(str(produced_out)))
 
         ran_commands = []
 
@@ -120,12 +107,47 @@ class PrepareVideoTests(unittest.TestCase):
             patch("extractor.subprocess.run", fake_run),
         ):
             out, info = extractor._prepare_video(src)
+        return out, ran_commands, produced_out
+
+    def test_hevc_source_skips_crf_and_goes_straight_to_ladder(self):
+        src = Path("/tmp/hevc_source.mp4")
+        probe_info = {
+            "vcodec": "hevc",
+            "width": 1080, "height": 1920,
+            "pix_fmt": "yuv420p", "sar": "1:1",
+            "duration": 240.0,
+        }
+        ladder_stat = type("S", (), {"st_size": 30 * 1024 * 1024})()
+        out, ran, produced_out = self._run(src, probe_info, lambda n: ladder_stat)
 
         self.assertEqual(out, produced_out)
-        # At least two ffmpeg invocations: the CRF pass plus one ladder pass.
-        self.assertGreaterEqual(len(ran_commands), 2)
-        # The ladder pass uses -b:v (size-targeted), the CRF pass uses -crf.
-        self.assertTrue(any("-b:v" in cmd for cmd in ran_commands[1:]))
+        # Every ffmpeg invocation should be a size-targeted ladder pass; no CRF.
+        self.assertTrue(ran)
+        self.assertFalse(any("-crf" in cmd for cmd in ran))
+        self.assertTrue(all("-b:v" in cmd for cmd in ran))
+
+    def test_non_hevc_crf_overshoot_falls_through_to_ladder(self):
+        src = Path("/tmp/vp9_source.mp4")
+        probe_info = {
+            "vcodec": "vp9",  # triggers needs_reencode but not skip_crf
+            "width": 1080, "height": 1920,
+            "pix_fmt": "yuv420p", "sar": "1:1",
+            "duration": 240.0,
+        }
+        crf_stat = type("S", (), {"st_size": 60 * 1024 * 1024})()
+        ladder_stat = type("S", (), {"st_size": 30 * 1024 * 1024})()
+        produced_out = src.with_name(src.stem + "_enc.mp4")
+        out, ran, _ = self._run(
+            src,
+            probe_info,
+            lambda n: crf_stat if n <= 2 else ladder_stat,
+        )
+
+        self.assertEqual(out, produced_out)
+        # CRF pass plus at least one ladder pass.
+        self.assertGreaterEqual(len(ran), 2)
+        self.assertTrue(any("-crf" in cmd for cmd in ran))
+        self.assertTrue(any("-b:v" in cmd for cmd in ran[1:]))
 
 
 if __name__ == "__main__":
