@@ -16,6 +16,7 @@ _GENERIC_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 _URL_TRAILING_PUNCT = ".,;:!?)\"']>"
 _LINK_LABEL = "link"
 _MAX_CAPTION_CHARS = 225
+_FALLBACK_CAPTION_CHARS = 200
 _ELLIPSIS = "..."
 _CAPTION_SEPARATOR = " - "
 
@@ -33,8 +34,6 @@ def _strip_embedded_urls(text: str) -> str:
 
     Used only on the failure path where the original URL is shown on its own
     line — embedded t.co/quote-tweet URLs would just be visual noise there.
-    The success-path caption uses `_format_caption_body` instead, which keeps
-    URLs as clean linked text.
     """
     return _GENERIC_URL_PATTERN.sub("", text).strip()
 
@@ -130,36 +129,24 @@ def _strip_urls(text: str) -> str:
     return URL_PATTERNS.sub("", text).strip()
 
 
-def _format_skip_message(prefix: str, url: str, caption: str | None) -> str:
-    """Build a `<prefix>: <caption>\\n<url>` message in plain text.
-
-    The URL is plain (not a text_link entity) so it's visible and copyable.
-    Bot messages are filtered out at the top of `handle_message`, so a plain
-    URL won't re-trigger extraction; `disable_web_page_preview=True` on the
-    send call suppresses the unfurl.
-    """
-    body = (caption or "").strip()
-    if body:
-        body = _truncate_text(body, 200)
-        return f"{prefix}: {body}\n{url}"
-    return f"{prefix}\n{url}"
-
-
 async def _post_failure(context, chat_id, thread_id, user_name, url, user_text, post_caption, *, oversize: bool = False):
     """Post a fallback that preserves the user's link + context.
 
-    Caption priority: user's own commentary first, otherwise the post's caption
-    if extraction got far enough to retrieve it. Uses "Too big to upload"
-    instead of "Couldn't fetch" when extraction succeeded but the video stayed
-    over the Telegram cap after compression — the link is technically fetchable,
-    just not deliverable inline.
+    The error itself is a short tag (`<XL>` = over the upload size cap,
+    not actionable; `<X>` = extraction or upload failed) instead of a full
+    sentence — keeps the chat tidy. Caption priority is user's own
+    commentary first, otherwise the post's caption if extraction got far
+    enough to retrieve it.
     """
     name = _first_name(user_name)
     platform = detect_platform(url)
+    tag = "XL" if oversize else "X"
     caption = (user_text or "").strip() or _strip_embedded_urls(post_caption or "")
-    reason = "Too big to upload" if oversize else "Couldn't fetch"
-    prefix = f"{reason} — {name} [{platform}]"
-    text = _format_skip_message(prefix, url, caption)
+    prefix = f"{name} [{platform}] <{tag}>"
+    if caption:
+        text = f"{prefix}: {_truncate_text(caption, _FALLBACK_CAPTION_CHARS)}\n{url}"
+    else:
+        text = f"{prefix}\n{url}"
     try:
         await context.bot.send_message(
             chat_id,
@@ -227,22 +214,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.warning("No media extracted from %s", url)
                 failed_urls.append((url, result.caption, result.oversize))
         except VideoDurationExceeded as e:
-            mins = e.duration // 60
-            secs = e.duration % 60
-            logger.info("Skipped %s — too long (%dm%ds)", url, mins, secs)
-            name = _first_name(user_name)
-            prefix = f"{name} [too long, {mins}m{secs:02d}s]"
-            caption = (user_text or "").strip() or (e.title or "")
-            text = _format_skip_message(prefix, url, caption)
-            try:
-                await context.bot.send_message(
-                    chat_id,
-                    text,
-                    disable_web_page_preview=True,
-                    message_thread_id=thread_id,
-                )
-            except Exception:
-                logger.exception("Failed to post too-long fallback for %s", url)
+            # Defensive backstop: `precheck_duration` should have caught this
+            # before delete and left the original message alone. Reaching here
+            # means the precheck missed, the original is already deleted, and
+            # we still need to surface the link.
+            logger.info("Skipped %s — too long (%ds)", url, e.duration)
+            failed_urls.append((url, e.title, True))
         except Exception:
             logger.exception("Failed to extract media from %s", url)
             failed_urls.append((url, None, False))
