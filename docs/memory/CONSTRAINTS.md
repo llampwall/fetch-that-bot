@@ -15,8 +15,8 @@
 - Temp files auto-deleted after 5 minutes (REST API cleanup timer)
 - Custom yt-dlp extractors live in `yt_dlp_plugins/extractor/` — yt-dlp discovers them automatically
 - Threads extractor uses Playwright (headless Chromium) — requires separate `playwright install chromium`
-- fetch-bot runs as a Windows NSSM service (not PM2) — auto-starts on boot, auto-restarts on crash (5s delay) (updated 2026-04-22)
-- NSSM logs: `P:\software\fetch\logs\out.log` and `error.log`; install script: `install-service.ps1` (run as admin)
+- fetch-bot runs as a Windows NSSM service (not PM2) — delayed auto-start on boot (~2 min), auto-restarts on crash (5s delay) (updated 2026-08-12)
+- NSSM logs: `P:\software\fetch\logs\out.log` and `error.log`; rotated at 10MB via `AppRotateFiles`/`AppRotateOnline`/`AppRotateBytes`; install script: `install-service.ps1` (run as admin) (updated 2026-08-12)
 - YouTube video duration cap: default 300s (5 min), configurable via `FETCH_MAX_YT_DURATION` env var (updated 2026-04-22)
 
 ## Rules
@@ -34,9 +34,13 @@
 - Pass `message_thread_id` through all Telegram send calls — required for forum topic (supergroup thread) support
 - YouTube videos over `FETCH_MAX_YT_DURATION` seconds (default 300) are silently skipped via `precheck_duration()` in `extractor.py` — no bot output, original message left untouched; metadata-only yt-dlp call (download=False) so no download occurs (updated 2026-05-10)
 - Do NOT add fetch-bot back to PM2 — NSSM decoupling was deliberate (PM2 coupling caused repeated outages)
+- fetch-bot service must use `SERVICE_DELAYED_AUTO_START` — plain `SERVICE_AUTO_START` races the P: volume at boot and NSSM dies with "The system cannot open the file" (Event 7024) (updated 2026-08-12)
 - Delete original user message only after at least one repost succeeds — prevents link disappearing on upload timeout
 - On extraction failure, duration-rejection, or upload error: send a per-URL fallback that preserves original URL and post caption — never drop the link silently (updated 2026-05-08)
 - ffmpeg compression uses progressive bitrate/resolution fallback; yt-dlp format selector caps source at 720p to avoid pulling 1080p60 streams that would need downscaling (updated 2026-05-08)
+- HEVC (h265) sources skip the CRF re-encode pass — CRF 23 H.264 at same resolution balloons 2-3x; go straight to size-targeted ladder (35→25→15 MB, 1280→960→720) (updated 2026-05-16)
+- CRF pass for non-HEVC sources checks output size after encode; if over cap, falls through to size-targeted ladder rather than silently dropping (updated 2026-05-16)
+- Failure tags in bot message headers: `<XL>` = too big to upload; `<X>` = couldn't fetch; URL + caption preserved on next line; `ExtractionResult.oversize` flag routes between them; `VideoDurationExceeded` backstop uses `<XL>` (updated 2026-05-16)
 - httpx Application timeouts: connect=20s, read=60s, write=120s; media uploads use 180s write timeout
 - Telegram PTB ApplicationBuilder read_timeout: 180s — matches upload window to absorb server-side processing lag (transcoding, thumbnail gen) for 30–45MB videos (updated 2026-05-08)
 
@@ -56,6 +60,7 @@
 - yt-dlp format selector uses a flexible fallback chain — Reddit DASH streams require this
 - `writethumbnail` was removed intentionally; re-enabling it causes duplicate files
 - Playwright/Chromium is NOT in requirements.txt — run `playwright install chromium` separately or Threads extraction will fail silently
+- Service binary and working dir live on the P: volume — any Windows service pointed there must not start early in boot (added 2026-08-12)
 - Threads extractor depends on page structure (`<script type="application/json">` tags) — if Meta changes the SPA format, extraction will break
 
 ## Superseded

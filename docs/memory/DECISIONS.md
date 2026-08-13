@@ -4,12 +4,24 @@
 # Decisions
 
 ## Recent (last 30 days)
-- YouTube over-duration videos now silently skipped — no bot output, original message stays untouched
-- Fixed URL-dominant captions collapsing to empty strings — linkify embedded URLs as HTML links instead of stripping
-- Fixed Telegram TimedOut false-alarm after large video upload — PTB read_timeout bumped to 180s
-- Extraction failures now preserve original URL + caption in fallback message (no more silent link drops)
-- ffmpeg compression hardened with progressive bitrate/resolution fallback; 720p source cap added to format selector
-- Fixed TikTok link deleted on upload timeout — reordered to send-then-delete; bumped httpx timeouts
+- Fixed fetch-bot not surviving reboot — service switched to SERVICE_DELAYED_AUTO_START (was racing the P: volume at boot)
+- NSSM log rotation enabled at 10MB with AppRotateOnline (logs had grown unbounded)
+
+## 2026-08
+
+### 2026-08-12 — Fixed fetch-bot failing to start after reboot
+
+- **Symptom:** After the 2026-08-10 reboot the service never came up; SCM started it ~25s into boot and NSSM died with "The system cannot open the file" (Event 7024) before the app ran
+- **Root cause:** `SERVICE_AUTO_START` raced the P: volume — NSSM could not open the pythonw.exe / main.py paths because the drive was not yet available
+- **Fix:** `install-service.ps1` sets `Start SERVICE_DELAYED_AUTO_START`, moving service start ~2 min past boot
+- **Prevention:** Any service whose binary or working directory lives on P: must use delayed auto-start
+- **Evidence:** 4c9de9d69cfd888106bac390a71d6b1a5b50b7fa
+
+### 2026-08-12 — Enable NSSM log rotation at 10MB
+
+- **Why:** `AppRotateFiles` was off; `out.log` had reached 9.2MB and `error.log` 1.6MB with no bound
+- **Impact:** `install-service.ps1` sets `AppRotateFiles 1`, `AppRotateOnline 1`, `AppRotateBytes 10485760`; `AppRotateOnline` lets NSSM roll files without restarting the service
+- **Evidence:** 4c9de9d69cfd888106bac390a71d6b1a5b50b7fa
 
 ## 2026-05
 
@@ -48,6 +60,26 @@
 - **Fix:** Reorder to send first, delete original only after at least one repost succeeds; failed sends count toward failure notice; bump httpx timeouts (connect=20s, read=60s, write=120s, media=180s); refactor metadata to single `_apply_metadata` extract_info pass; caption trimmed to 225 chars; source URLs stripped from fallback captions
 - **Prevention:** Never delete the original before confirming at least one delivery succeeded
 - **Evidence:** d3f31851d872b4179536367ef01fc145ecb75d5a
+
+### 2026-05-16 — Fixed CRF re-encode silently dropping oversized HEVC output
+
+- **Symptom:** TikTok 18MB 1080p HEVC clips hit the `needs_reencode and not needs_compress` path, ran a CRF 23 H.264 re-encode, and produced ~60MB output — over the Telegram cap — which was silently dropped and surfaced as "Couldn't fetch"
+- **Root cause:** CRF pass trusted its output without checking size; HEVC → H.264 at same resolution can balloon 2-3x
+- **Fix:** CRF pass now checks output size; if over cap, falls through to size-targeted ladder (35→25→15 MB, 1280→960→720); new `ExtractionResult.oversize` flag added; "Too big to upload" distinguishes from "Couldn't fetch"
+- **Prevention:** Any re-encode pass must validate output size before trusting result
+- **Evidence:** 5ba4f07549da5006d3bf285fadd18155102c5892
+
+### 2026-05-16 — Shorten failure tags to `<XL>` / `<X>`
+
+- **Why:** Verbose "Too big to upload" / "Couldn't fetch" phrases inside the header were noisy; single-token tags keep the header line compact while preserving URL + caption on the next line
+- **Impact:** `<XL>` = too big to upload; `<X>` = couldn't fetch; `VideoDurationExceeded` backstop now routes through `<XL>` instead of its own bespoke message; `handlers.py` simplified
+- **Evidence:** 35def449fe0fd99e6201c6e85d9ab2a5c9542c14
+
+### 2026-05-16 — Skip CRF re-encode pass for HEVC sources
+
+- **Why:** HEVC sources reliably balloon 2-3x under CRF 23 H.264 at the same resolution; the quality-targeted pass just gets discarded by the overshoot check and the size-targeted ladder runs anyway — one wasted ffmpeg invocation on the common TikTok over-cap path
+- **Impact:** `extractor.py` detects `hevc`/`h265` codec and skips directly to size-targeted ladder; `PrepareVideoTests` split — HEVC asserts no `-crf` invocation, non-HEVC (vp9) keeps CRF-overshoot coverage; cuts end-to-end latency on HEVC sources
+- **Evidence:** 4e37bf80363b968490161f98b82188c6e162bb41
 
 ## 2026-04
 
