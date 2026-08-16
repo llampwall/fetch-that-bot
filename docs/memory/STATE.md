@@ -1,5 +1,8 @@
 <!-- DO: Rewrite freely. Keep under 30 lines. Current truth only. -->
 <!-- DON'T: Add history, rationale, or speculation. No "we used to..." -->
+<!-- ANCHOR: if the only commits since the anchor are `docs(memory):` anchor bumps,
+     memory is current — report up-to-date and make NO commit. -->
+
 
 # State
 
