@@ -39,6 +39,7 @@ Get-Service fetch-bot    # Standard Windows service query
 - Auto-starts on boot, auto-restarts on crash (5s delay)
 - Logs: `P:\software\fetch\logs\out.log` and `error.log`
 - Install script: `install-service.ps1` (run as admin to recreate)
+- `start.cmd`, `stop.cmd`, and `.strap/nssm-install.cmd` are strap-generated (from the `fetch` entry in `P:\software\_strap\registry.json`) — regenerate with `strap lifecycle fetch`, never hand-edit. They drive a thin wrapper service named `fetch` that just calls `nssm start fetch-bot`.
 - **Do NOT add fetch-bot back to PM2** — that coupling caused repeated outages
 
 ## Architecture

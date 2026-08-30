@@ -4,10 +4,17 @@
 # Decisions
 
 ## Recent (last 30 days)
+- Committed strap-generated lifecycle artifacts (`start.cmd`, `stop.cmd`, `.strap/nssm-install.cmd`) so strap can drive the fetch-bot service
 - Fixed fetch-bot not surviving reboot — service switched to SERVICE_DELAYED_AUTO_START (was racing the P: volume at boot)
 - NSSM log rotation enabled at 10MB with AppRotateOnline (logs had grown unbounded)
 
 ## 2026-08
+
+### 2026-08-29 — Adopt strap-generated lifecycle artifacts
+
+- **Why:** strap needs uniform `start.cmd`/`stop.cmd` entry points to manage the repo's lifecycle; fetch had only the hand-written `install-service.ps1`
+- **Impact:** `start.cmd`, `stop.cmd`, and `.strap/nssm-install.cmd` added at repo root, generated from the `fetch` lifecycle entry in `P:\software\_strap\registry.json` (`strap lifecycle fetch` regenerates; edits are erased). They install/drive a thin wrapper service named `fetch` whose only action is `nssm start fetch-bot` — the real service and its delayed-auto-start config still come from `install-service.ps1`
+- **Evidence:** 99a5d28b940961ce52b81462e428a52d56a4bc43
 
 ### 2026-08-12 — Fixed fetch-bot failing to start after reboot
 
