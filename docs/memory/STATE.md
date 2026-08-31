@@ -10,15 +10,16 @@
 Telegram bot + REST API that extracts and delivers media from social URLs (Instagram, X, TikTok, YouTube, Reddit, Threads)
 
 ## Active Work
-- No app code changes since 4c9de9d; last commit added strap lifecycle artifacts (`start.cmd`, `stop.cmd`, `.strap/nssm-install.cmd`)
-- `fetch-bot` is SERVICE_RUNNING; the strap wrapper service `fetch` is not installed yet
-- Untracked in the working tree: `test_threads.py`, `AGENTS.md`, `docs/sys/lookup.json`, `.claude/`, `QLAUDE_SMOKE.md`, `test_out.txt`/`test_err.txt`
+- No app code changes since 4c9de9d; only memory/lifecycle commits since
+- `fetch-bot` is SERVICE_RUNNING (pythonw + main.py, delayed auto-start); the old `fetch` wrapper service was never installed
+- strap regenerated lifecycle as `start-fetch-bot.cmd` / `stop-fetch-bot.cmd` / `.strap/nssm-install-fetch-bot.cmd` (untracked); the installer is self-referential and must not be run
+- Untracked: `test_threads.py`, `AGENTS.md`, `docs/sys/`, `.claude/`, `QLAUDE_SMOKE.md`, `test_out.txt`/`test_err.txt`
 
 ## Blockers
 None known
 
 ## Next Actions
-- [ ] Run `.strap\nssm-install.cmd` as admin to install the `fetch` wrapper service, or accept that `start.cmd`/`stop.cmd` fail
+- [ ] Fix the `fetch` entry in `P:\software\_strap\registry.json` so lifecycle stops emitting a self-targeting `nssm install fetch-bot` installer; then delete the stale `start.cmd`/`stop.cmd`/`.strap/nssm-install.cmd`
 - [ ] Commit `test_threads.py`, `AGENTS.md`, and `docs/sys/lookup.json`; gitignore or delete `test_out.txt`/`test_err.txt`
 - [ ] Expand `docs/sys/lookup.json` — it indexes only `extractor` and `install`
 - [ ] Run `playwright install chromium` in .venv to enable Threads extraction
@@ -36,7 +37,7 @@ None known
 - Separate api.py process (merged into main.py as of 2026-04-11)
 
 ---
-Last memory update: 2026-08-29
-Commits covered through: 99a5d28b940961ce52b81462e428a52d56a4bc43
+Last memory update: 2026-08-30
+Commits covered through: ccc2ffebb38eb06c05d0976490da73af78b421c8
 
-<!-- chinvex:last-commit:99a5d28b940961ce52b81462e428a52d56a4bc43 -->
+<!-- chinvex:last-commit:ccc2ffebb38eb06c05d0976490da73af78b421c8 -->

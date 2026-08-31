@@ -19,7 +19,9 @@
 - NSSM logs: `P:\software\fetch\logs\out.log` and `error.log`; rotated at 10MB via `AppRotateFiles`/`AppRotateOnline`/`AppRotateBytes`; install script: `install-service.ps1` (run as admin) (updated 2026-08-12)
 - YouTube video duration cap: default 300s (5 min), configurable via `FETCH_MAX_YT_DURATION` env var (updated 2026-04-22)
 - strap lifecycle artifacts at repo root: `start.cmd`, `stop.cmd`, `.strap/nssm-install.cmd` — generated from the `fetch` entry in `P:\software\_strap\registry.json`; regenerate with `strap lifecycle fetch`, never hand-edit (added 2026-08-29)
-- strap's wrapper service is named `fetch` and only runs `nssm start fetch-bot`; the real service is still `fetch-bot` from `install-service.ps1` (added 2026-08-29)
+- strap's wrapper service was named `fetch` and only ran `nssm start fetch-bot`; the real service is still `fetch-bot` from `install-service.ps1` (updated 2026-08-30 — strap now emits `-fetch-bot`-suffixed artifacts that target the `fetch-bot` name directly)
+- Current strap output is `start-fetch-bot.cmd`, `stop-fetch-bot.cmd`, `.strap/nssm-install-fetch-bot.cmd` (untracked); the tracked `start.cmd`/`stop.cmd`/`.strap/nssm-install.cmd` are the older `fetch`-wrapper generation and are now stale (added 2026-08-30)
+- Real `fetch-bot` service config: Application `P:\software\fetch\.venv\Scripts\pythonw.exe`, AppParameters `P:\software\fetch\main.py`, Start `SERVICE_DELAYED_AUTO_START` (added 2026-08-30)
 
 ## Rules
 - `.env` and `cookies.txt` are gitignored — never commit credentials
@@ -65,6 +67,7 @@
 - Service binary and working dir live on the P: volume — any Windows service pointed there must not start early in boot (added 2026-08-12)
 - The `fetch` wrapper service is not installed (`nssm status fetch` → "service does not exist"); `start.cmd`/`stop.cmd` fail until `.strap\nssm-install.cmd` is run as admin (added 2026-08-29)
 - `.strap/nssm-install.cmd` sets `Start SERVICE_AUTO_START` on the `fetch` wrapper — do not point that wrapper at a P:-resident binary; it only calls `nssm start fetch-bot`, and `fetch-bot` itself must stay `SERVICE_DELAYED_AUTO_START` (added 2026-08-29)
+- DO NOT run `.strap\nssm-install-fetch-bot.cmd` — it would `nssm install fetch-bot` pointing at `cmd /c nssm start fetch-bot` (self-referential) and set `SERVICE_AUTO_START`, clobbering the real python service and violating the delayed-start rule. Regenerating strap lifecycle for `fetch` produced a self-targeting installer because the registry service name equals the real service name (added 2026-08-30)
 - Threads extractor depends on page structure (`<script type="application/json">` tags) — if Meta changes the SPA format, extraction will break
 
 ## Superseded
