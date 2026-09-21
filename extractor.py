@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -11,6 +12,8 @@ from pathlib import Path
 import yt_dlp
 
 from config import TEMP_DIR, MAX_UPLOAD_BYTES, COOKIES_FILE, MAX_YOUTUBE_DURATION
+
+logger = logging.getLogger(__name__)
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
@@ -295,6 +298,27 @@ def precheck_duration(url: str, platform: str) -> int | None:
     return None
 
 
+class _YtdlpLog:
+    """Route yt-dlp's own output into our logger instead of stderr.
+
+    `quiet` silences progress but not errors, so an image-only post still wrote
+    an ERROR line to error.log even though the gallery-dl fallback then served
+    it. These are reported by the caller only when the fallback also comes back
+    empty, so they arrive here as debug.
+    """
+
+    def debug(self, msg: str) -> None:
+        logger.debug("yt-dlp: %s", msg)
+
+    info = debug
+
+    def warning(self, msg: str) -> None:
+        logger.debug("yt-dlp: %s", msg)
+
+    def error(self, msg: str) -> None:
+        logger.debug("yt-dlp: %s", msg)
+
+
 def extract_media(url: str, platform: str) -> ExtractionResult:
     """Download media from a URL using yt-dlp and return extracted items."""
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -323,6 +347,7 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
         "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
         # Don't download overly massive files — we'll compress if needed
         "max_filesize": MAX_UPLOAD_BYTES * 3,
+        "logger": _YtdlpLog(),
     }
 
     # Use cookies if available (needed for Instagram stories, private content)
@@ -331,6 +356,7 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
 
     result = ExtractionResult(platform=platform)
     metadata = None
+    ytdlp_error: Exception | None = None
 
     try:
         with yt_dlp.YoutubeDL({**ydl_opts, "quiet": True}) as ydl:
@@ -404,10 +430,14 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
         if ytdlp_produced_files and not result.items:
             return result
 
-    except Exception:
-        # yt-dlp failed — will try gallery-dl fallback below
-        import logging as _log
-        _log.getLogger(__name__).exception("yt-dlp extraction failed for %s", url)
+    except Exception as e:
+        # An image-only post ALWAYS fails here — yt-dlp has no image path for one — and the
+        # gallery-dl fallback below is what serves it. Logging a traceback at this point
+        # recorded the design as a failure on every image the bot handled. The error is held
+        # instead and reported only if the fallback ALSO comes back empty, which is the case
+        # that is actually a failure.
+        ytdlp_error = e
+        logger.debug("yt-dlp got nothing for %s (%s) — trying gallery-dl", url, e)
 
     # Fallback to gallery-dl if yt-dlp got nothing (e.g. image-only tweets)
     if not result.items:
@@ -428,6 +458,12 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
         except Exception as e:
             shutil.rmtree(download_dir, ignore_errors=True)
             raise RuntimeError(f"Extraction failed for {url}: {e}") from e
+
+    # Both paths came back empty. THIS is the failure, and it is the one place the
+    # held yt-dlp error is worth reading, so it goes out with its cause attached
+    # rather than as a bare "no media" the caller cannot act on.
+    if not result.items and ytdlp_error is not None:
+        logger.warning("No media from either extractor for %s — yt-dlp said: %s", url, ytdlp_error)
 
     return result
 
