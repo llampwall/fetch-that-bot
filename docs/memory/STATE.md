@@ -10,20 +10,20 @@
 Telegram bot + REST API that extracts and delivers media from social URLs (Instagram, X, TikTok, YouTube, Reddit, Threads)
 
 ## Active Work
-- No app code changes since 4c9de9d; only memory/lifecycle commits since
-- `fetch-bot` is SERVICE_RUNNING (pythonw + main.py, delayed auto-start); the old `fetch` wrapper service was never installed
-- strap regenerated lifecycle as `start-fetch-bot.cmd` / `stop-fetch-bot.cmd` / `.strap/nssm-install-fetch-bot.cmd` (untracked); the installer is self-referential and must not be run
-- `docs/sys/lookup.json` is now gitignored (uncommitted `.gitignore` edit); untracked: `test_threads.py`, `AGENTS.md`, `.claude/`, `QLAUDE_SMOKE.md`, `test_out.txt`/`test_err.txt`
+- Log hygiene: yt-dlp output now routed to a logger adapter at debug; the yt-dlp exception is held and reported once at warning only when the gallery-dl fallback also comes back empty (9943c46)
+- `fetch-bot` is Running (pythonw + main.py, delayed auto-start); the `fetch` wrapper service was never installed
+- strap lifecycle output is `start-fetch-bot.cmd` / `stop-fetch-bot.cmd` / `.strap/nssm-install-fetch-bot.cmd` (all untracked); the installer is self-referential and must not be run
+- Untracked/uncommitted: `.gitignore` edit (lookup.json), `test_threads.py`, `AGENTS.md`, `.claude/`, `QLAUDE_SMOKE.md`, `test_out.txt`/`test_err.txt`, `cookies.txt.bak-20260921-160400`
 
 ## Blockers
 None known
 
 ## Next Actions
+- [ ] Gitignore `cookies.txt*` — the `cookies.txt.bak-20260921-160400` backup is untracked but NOT ignored and holds live session cookies
 - [ ] Fix the `fetch` entry in `P:\software\_strap\registry.json` so lifecycle stops emitting a self-targeting `nssm install fetch-bot` installer; then delete the stale `start.cmd`/`stop.cmd`/`.strap/nssm-install.cmd`
 - [ ] Commit the `.gitignore` change plus `test_threads.py` and `AGENTS.md`; gitignore or delete `test_out.txt`/`test_err.txt`
-- [ ] Expand `docs/sys/lookup.json` — it indexes only `extractor` and `install`
-- [ ] Run `playwright install chromium` in .venv to enable Threads extraction
-- [ ] Add gallery-dl to requirements.txt (currently only installed in .venv)
+- [ ] Fix the `ytdlp_plugins.extractor` name collision that errors 3 of 19 tests under `unittest discover`
+- [ ] Add gallery-dl to requirements.txt and run `playwright install chromium` in .venv (Threads)
 
 ## Quick Reference
 - Run: `python main.py` (requires `.env` with `FETCH_BOT_TOKEN` and `FETCH_WEBHOOK_URL`)
@@ -37,7 +37,7 @@ None known
 - Separate api.py process (merged into main.py as of 2026-04-11)
 
 ---
-Last memory update: 2026-09-05
-Commits covered through: 0da829c34fc8d12b0fa67c09451b3d1f1a57a077
+Last memory update: 2026-09-21
+Commits covered through: 9943c4624b99d9fba42e0ee0a7795526a66f780c
 
-<!-- chinvex:last-commit:0da829c34fc8d12b0fa67c09451b3d1f1a57a077 -->
+<!-- chinvex:last-commit:9943c4624b99d9fba42e0ee0a7795526a66f780c -->

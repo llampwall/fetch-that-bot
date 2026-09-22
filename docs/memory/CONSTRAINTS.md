@@ -45,6 +45,8 @@
 - HEVC (h265) sources skip the CRF re-encode pass — CRF 23 H.264 at same resolution balloons 2-3x; go straight to size-targeted ladder (35→25→15 MB, 1280→960→720) (updated 2026-05-16)
 - CRF pass for non-HEVC sources checks output size after encode; if over cap, falls through to size-targeted ladder rather than silently dropping (updated 2026-05-16)
 - Failure tags in bot message headers: `<XL>` = too big to upload; `<X>` = couldn't fetch; URL + caption preserved on next line; `ExtractionResult.oversize` flag routes between them; `VideoDurationExceeded` backstop uses `<XL>` (updated 2026-05-16)
+- yt-dlp is configured with a `logger` adapter (`_YtdlpLog` in `extractor.py`) that downgrades its warning/error output to debug — `quiet` alone silences progress but not errors. Do not remove it or revert to bare stderr (added 2026-09-21)
+- An image-only post ALWAYS fails yt-dlp (no image path); gallery-dl is what serves it. Hold the yt-dlp exception and report it once at warning (with `exc_info`/cause) only when the gallery-dl fallback also returns no items — never `log.exception` at the yt-dlp catch site (added 2026-09-21)
 - httpx Application timeouts: connect=20s, read=60s, write=120s; media uploads use 180s write timeout
 - Telegram PTB ApplicationBuilder read_timeout: 180s — matches upload window to absorb server-side processing lag (transcoding, thumbnail gen) for 30–45MB videos (updated 2026-05-08)
 
@@ -68,6 +70,8 @@
 - The `fetch` wrapper service is not installed (`nssm status fetch` → "service does not exist"); `start.cmd`/`stop.cmd` fail until `.strap\nssm-install.cmd` is run as admin (added 2026-08-29)
 - `.strap/nssm-install.cmd` sets `Start SERVICE_AUTO_START` on the `fetch` wrapper — do not point that wrapper at a P:-resident binary; it only calls `nssm start fetch-bot`, and `fetch-bot` itself must stay `SERVICE_DELAYED_AUTO_START` (added 2026-08-29)
 - DO NOT run `.strap\nssm-install-fetch-bot.cmd` — it would `nssm install fetch-bot` pointing at `cmd /c nssm start fetch-bot` (self-referential) and set `SERVICE_AUTO_START`, clobbering the real python service and violating the delayed-start rule. Regenerating strap lifecycle for `fetch` produced a self-targeting installer because the registry service name equals the real service name (added 2026-08-30)
+- `.gitignore` lists `cookies.txt` literally, not `cookies.txt*` — timestamped backups such as `cookies.txt.bak-20260921-160400` are NOT ignored and will be picked up by `git add -A`. Never `git add -A` in this repo until the pattern is widened (added 2026-09-21)
+- `unittest discover` errors 3 of 19 tests on a pre-existing `ytdlp_plugins.extractor` package-name collision — that is the known baseline, not a regression (added 2026-09-21)
 - Threads extractor depends on page structure (`<script type="application/json">` tags) — if Meta changes the SPA format, extraction will break
 
 ## Superseded

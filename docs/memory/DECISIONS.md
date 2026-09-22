@@ -4,9 +4,19 @@
 # Decisions
 
 ## Recent (last 30 days)
-- Committed strap-generated lifecycle artifacts (`start.cmd`, `stop.cmd`, `.strap/nssm-install.cmd`) so strap can drive the fetch-bot service
-- Fixed fetch-bot not surviving reboot — service switched to SERVICE_DELAYED_AUTO_START (was racing the P: volume at boot)
-- NSSM log rotation enabled at 10MB with AppRotateOnline (logs had grown unbounded)
+- Stopped logging the image-post gallery-dl fallback as a failure — error.log was mostly successful extractions
+- yt-dlp output routed through a logger adapter at debug; its exception reported once, at warning, only when the fallback also returns nothing
+- `docs/sys/lookup.json` gitignored (working-tree `.gitignore` edit, not yet committed)
+
+## 2026-09
+
+### 2026-09-21 — Fixed image-post fallback being logged as a failure
+
+- **Symptom:** Every image post the bot handled successfully wrote a multi-frame traceback plus yt-dlp ERROR lines to `error.log`; most of that file's 49 KB was successful extractions
+- **Root cause:** An image-only post always fails yt-dlp (it has no image path for one) and gallery-dl is the intended server. The yt-dlp catch site called `log.exception` unconditionally, and `quiet` silences progress but not yt-dlp's own stderr ERROR output
+- **Fix:** Added `_YtdlpLog` adapter in `extractor.py` passed as the yt-dlp `logger` (warning/error downgraded to debug); the yt-dlp exception is held in `ytdlp_error` and reported once at warning with its cause attached, only when the gallery-dl fallback also comes back empty
+- **Prevention:** Do not log at the yt-dlp catch site — an expected miss is not a failure until the fallback also fails
+- **Evidence:** 9943c4624b99d9fba42e0ee0a7795526a66f780c (verified live: image post → 1 photo, zero stderr; reel → 1 video; unresolvable post → single warning. Tests 19 run / 3 errors, the 3 a pre-existing `ytdlp_plugins.extractor` name collision)
 
 ## 2026-08
 
