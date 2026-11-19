@@ -1,5 +1,5 @@
-<!-- DO: Add bullets. Edit existing bullets in place with (updated YYYY-MM-DD). -->
-<!-- DON'T: Delete bullets. Don't write prose. Don't duplicate — search first. -->
+<!-- DO: Keep active rules self-contained; preserve all operative qualifiers when merging. -->
+<!-- DON'T: Duplicate rules, retain superseded material, or move operative meaning into an archive. -->
 
 # Constraints
 
@@ -31,7 +31,7 @@
 - Caption body built by `_format_caption_body()` in `handlers.py` — HTML-escapes text, linkifies embedded URLs; do not revert to stripping (URL-only captions become empty strings)
 - Do not re-enable `writethumbnail` — it creates duplicate files alongside videos
 - iOS normalization required: encode to H.264/AAC/yuv420p with square pixels — fixes audio-only and squished aspect ratio on iOS Telegram
-- yt-dlp format selector prefers H.264 (avc1) to avoid AV1/VP9 codec issues (updated 2026-04-10)
+- yt-dlp format selector prefers H.264 (`avc1` or `h264`, via `_H264`) to avoid AV1/VP9 codec issues (updated 2026-11-18)
 - Pass explicit width/height/duration to Telegram `send_video` calls
 - Threads extractor wraps Playwright in `ThreadPoolExecutor` — required to avoid asyncio event loop conflicts with the bot's async runtime
 - Windows subprocess calls use `_NO_WINDOW` (`CREATE_NO_WINDOW`) flag — prevents console windows from popping up on Windows
@@ -47,6 +47,7 @@
 - On extraction failure, duration-rejection, or upload error: send a per-URL fallback that preserves original URL and post caption — never drop the link silently (updated 2026-05-08)
 - ffmpeg compression uses progressive bitrate/resolution fallback; yt-dlp format selector caps source at 720p to avoid pulling 1080p60 streams that would need downscaling (updated 2026-05-08)
 - HEVC (h265) sources skip the CRF re-encode pass — CRF 23 H.264 at same resolution balloons 2-3x; go straight to size-targeted ladder (35→25→15 MB, 1280→960→720) (updated 2026-05-16)
+- When the source already fits under the upload cap (re-encode for codec only), the size ladder's per-pass target is capped at `max(2 × source size, 8 MB)` (`size_ceiling` in `_prepare_video`), so a small HEVC clip is not inflated toward 35 MB (added 2026-11-18)
 - CRF pass for non-HEVC sources checks output size after encode; if over cap, falls through to size-targeted ladder rather than silently dropping (updated 2026-05-16)
 - Failure tags in bot message headers: `<XL>` = too big to upload; `<X>` = couldn't fetch; URL + caption preserved on next line; `ExtractionResult.oversize` flag routes between them; `VideoDurationExceeded` backstop uses `<XL>` (updated 2026-05-16)
 - yt-dlp is configured with a `logger` adapter (`_YtdlpLog` in `extractor.py`) that downgrades its warning/error output to debug — `quiet` alone silences progress but not errors. Do not remove it or revert to bare stderr (added 2026-09-21)
@@ -77,6 +78,5 @@
 - `.gitignore` lists `cookies.txt` literally, not `cookies.txt*` — timestamped backups such as `cookies.txt.bak-20260921-160400` are NOT ignored and will be picked up by `git add -A`. Never `git add -A` in this repo until the pattern is widened (added 2026-09-21)
 - `unittest discover` errors 3 of 19 tests on a pre-existing `ytdlp_plugins.extractor` package-name collision — that is the known baseline, not a regression (added 2026-09-21)
 - Threads extractor depends on page structure (`<script type="application/json">` tags) — if Meta changes the SPA format, extraction will break
-
-## Superseded
-- (Superseded 2026-04-22) PM2 config: `ecosystem.config.cjs` — replaced by NSSM Windows service; PM2 coupling caused outages
+- requirements.txt pins `yt-dlp[curl-cffi]>=2026.10.26`; a `.venv` installed from the old `yt-dlp>=2024.0` line lacks `curl_cffi` and every TikTok silently degrades to the gallery-dl HEVC path. Reinstall requirements after pulling (added 2026-11-19)
+- PM2's `ecosystem.config.cjs` is a retired deployment path (replaced by NSSM 2026-04-22); do not revive it (see the PM2 rule above)

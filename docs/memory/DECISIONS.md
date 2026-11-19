@@ -4,9 +4,37 @@
 # Decisions
 
 ## Recent (last 30 days)
-- Stopped logging the image-post gallery-dl fallback as a failure — error.log was mostly successful extractions
-- yt-dlp output routed through a logger adapter at debug; its exception reported once, at warning, only when the fallback also returns nothing
+- Bot token redacted from every log line by a root-handler formatter (httpx was logging it in Bot API URLs)
+- TikTok photo posts sent as a slideshow video with their soundtrack instead of a silent album
+- TikTok videos download native H.264 via yt-dlp; `yt-dlp[curl-cffi]>=2026.10.26` added for browser impersonation
+- Size ladder capped at 2x source size when the source already fits, so codec-only re-encodes don't inflate
 - `docs/sys/lookup.json` gitignored (working-tree `.gitignore` edit, not yet committed)
+
+## 2026-11
+
+### 2026-11-18 — Fixed bot token leaking into logs
+
+- **Symptom:** The Telegram bot token appeared in plain text throughout the NSSM `out.log`/`error.log`
+- **Root cause:** httpx logs every Bot API request at INFO with the token in the URL path (`/bot<token>/...`), and its exceptions carry the same URL into tracebacks
+- **Fix:** `RedactingFormatter` in `main.py` on the root handlers replaces the token with `<BOT_TOKEN>` in the finished line, covering messages and tracebacks
+- **Prevention:** Any new log handler must use the redacting formatter
+- **Evidence:** ff958f2ed4d409f78d8be3c4bbb00708c62c75ba
+
+### 2026-11-18 — Fixed TikTok videos re-encoded from HEVC and inflated
+
+- **Symptom:** A 13 MB TikTok went out at 30 MB after a full re-encode
+- **Root cause:** TikTok labels H.264 formats `h264`, not `avc1`, so the avc1-only selector never matched; TikTok also now blocks yt-dlp without browser impersonation, so every TikTok fell back to gallery-dl's 1080p HEVC stream; the size ladder then targeted 35 MB regardless of source size
+- **Fix:** Selector matches both labels (`_H264`); `yt-dlp[curl-cffi]>=2026.10.26` in requirements for impersonation; H.264 sources with HE-AAC copy video and re-encode only audio to AAC-LC; ladder target capped at `max(2 × source, 8 MB)` when the source already fits
+- **Prevention:** Check `vcodec` labels per platform before filtering on them; a codec-only re-encode must not exceed a bound tied to the source size
+- **Evidence:** 5564858504e8beecf52628e4b81e30f2a6b34556
+
+### 2026-11-18 — Fixed TikTok photo posts arriving as a silent album
+
+- **Symptom:** TikTok `/photo/` posts were delivered as a photo album with no sound
+- **Root cause:** yt-dlp rejects `/photo/` posts; the gallery-dl fallback returned the soundtrack mp3 but `_collect_files` dropped it
+- **Fix:** The fallback keeps audio and `_build_slideshow()` renders slides over the track as one H.264/AAC video (album only if the render fails); each slide is its own looped ffmpeg input because mixed slide sizes truncated the video under the concat demuxer
+- **Prevention:** Do not use the concat demuxer for mixed-size slides
+- **Evidence:** d1be68c7e6cce1f75266e6144b7bc46621b88db8
 
 ## 2026-09
 
