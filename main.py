@@ -24,10 +24,22 @@ from config import (
 from extractor import extract_media
 from handlers import handle_message
 
-logging.basicConfig(
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    level=logging.INFO,
-)
+class RedactingFormatter(logging.Formatter):
+    """Keep the bot token out of log output.
+
+    httpx logs every Bot API call at INFO with the full request URL, which
+    embeds the token (`/bot<token>/sendVideo`), and its exceptions carry the
+    same URL into tracebacks. Redacting the finished line covers both.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        return text.replace(BOT_TOKEN, "<BOT_TOKEN>") if BOT_TOKEN else text
+
+
+logging.basicConfig(level=logging.INFO)
+for _handler in logging.getLogger().handlers:
+    _handler.setFormatter(RedactingFormatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
 logger = logging.getLogger("fetch")
 
 executor = ThreadPoolExecutor(max_workers=4)
