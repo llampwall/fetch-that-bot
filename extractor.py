@@ -90,7 +90,13 @@ def _probe_video(path: Path) -> dict | None:
         )
         if not video_stream:
             return None
+        audio_stream = next(
+            (s for s in data.get("streams", []) if s.get("codec_type") == "audio"),
+            None,
+        )
         return {
+            "acodec": audio_stream.get("codec_name") if audio_stream else None,
+            "aprofile": audio_stream.get("profile") if audio_stream else None,
             "vcodec": video_stream.get("codec_name"),
             "width": int(video_stream.get("width") or 0),
             "height": int(video_stream.get("height") or 0),
@@ -115,6 +121,17 @@ def _needs_reencode(info: dict) -> bool:
     if sar not in ("1:1", "0:1"):
         return True
     return False
+
+
+def _needs_audio_fix(info: dict) -> bool:
+    """True when the audio track isn't plain AAC-LC.
+
+    TikTok's H.264 streams carry HE-AACv2 audio. The video can be sent as-is,
+    but the audio is normalized to AAC-LC, which every Telegram client plays.
+    """
+    if not info.get("acodec"):
+        return False  # no audio track to fix
+    return info.get("acodec") != "aac" or info.get("aprofile") not in ("LC", None)
 
 
 _AUDIO_BITRATE_KBPS = 128
@@ -172,10 +189,26 @@ def _prepare_video(path: Path) -> tuple[Path, dict | None]:
     needs_reencode = _needs_reencode(info)
     needs_compress = size > MAX_UPLOAD_BYTES
 
-    if not needs_reencode and not needs_compress:
-        return path, info
-
     out = path.with_name(path.stem + "_enc.mp4")
+
+    if not needs_reencode and not needs_compress:
+        if not _needs_audio_fix(info):
+            return path, info
+        # Video is already fine: copy it and re-encode only the audio.
+        cmd = [
+            "ffmpeg", "-y", "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", f"{_AUDIO_BITRATE_KBPS}k",
+            "-movflags", "+faststart",
+            str(out),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=600, creationflags=_NO_WINDOW)
+        if proc.returncode == 0 and out.exists() and out.stat().st_size > 0:
+            return out, _probe_video(out) or info
+        stderr_tail = (proc.stderr or b"").decode("utf-8", "replace")[-500:]
+        log.warning("Audio normalize failed (rc=%d), sending original: %s", proc.returncode, stderr_tail)
+        return path, info
 
     # HEVC sources reliably balloon under CRF 23 H.264 at the same resolution
     # (2-3x growth is typical), so the CRF pass is wasted work that gets
@@ -222,7 +255,11 @@ def _prepare_video(path: Path) -> tuple[Path, dict | None]:
         path.name, size // (1024 * 1024),
         float(info.get("duration") or 0), info.get("vcodec"),
     )
+    # A source that already fits only needs a codec change, so don't let the
+    # ladder inflate it (a 2 MB HEVC clip used to come out at 29 MB).
+    size_ceiling = MAX_UPLOAD_BYTES if needs_compress else max(2 * size, 8 * 1024 * 1024)
     for target_bytes, max_dim in passes:
+        target_bytes = min(target_bytes, size_ceiling)
         cmd, vbr, dur = _compress_cmd(path, out, info, target_bytes, max_dim)
         proc = subprocess.run(
             cmd, capture_output=True, timeout=600, creationflags=_NO_WINDOW,
@@ -372,6 +409,9 @@ def precheck_duration(url: str, platform: str) -> int | None:
     return None
 
 
+_H264 = "[vcodec~='^(avc1|h264)']"
+
+
 class _YtdlpLog:
     """Route yt-dlp's own output into our logger instead of stderr.
 
@@ -404,16 +444,18 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
         "no_warnings": True,
         # Prefer mp4 container for video
         "merge_output_format": "mp4",
-        # Prefer H.264 (avc1) explicitly — iOS Telegram can't decode AV1 or VP9.
-        # Cap height at 720p so we don't pull a 1080p60 source we'd just have to
-        # downscale anyway (TikTok in particular ships ~150MB 1080p60 streams).
+        # Prefer H.264 explicitly — iOS Telegram can't decode AV1 or VP9.
+        # Most sites label it `avc1`; TikTok labels it `h264`, and matching
+        # only `avc1` sent every TikTok to its 1080p HEVC stream and a full
+        # re-encode. Cap height at 720p so we don't pull a 1080p60 source we'd
+        # just have to downscale anyway.
         "format": (
-            "bv*[vcodec^=avc1][height<=720]+ba[acodec^=mp4a]"
-            "/bv*[vcodec^=avc1][height<=720]+ba"
-            "/bv*[vcodec^=avc1]+ba[acodec^=mp4a]"
-            "/bv*[vcodec^=avc1]+ba"
-            "/b[vcodec^=avc1][height<=720]"
-            "/b[vcodec^=avc1]"
+            f"bv*{_H264}[height<=720]+ba[acodec^=mp4a]"
+            f"/bv*{_H264}[height<=720]+ba"
+            f"/bv*{_H264}+ba[acodec^=mp4a]"
+            f"/bv*{_H264}+ba"
+            f"/b{_H264}[height<=720]"
+            f"/b{_H264}"
             "/b[ext=mp4]"
             "/b"
         ),

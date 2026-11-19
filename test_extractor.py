@@ -184,6 +184,30 @@ class PrepareVideoTests(unittest.TestCase):
         self.assertFalse(any("-crf" in cmd for cmd in ran))
         self.assertTrue(all("-b:v" in cmd for cmd in ran))
 
+    def test_h264_with_he_aac_copies_video_and_reencodes_audio_only(self):
+        # TikTok's native stream: H.264 video is fine, HE-AACv2 audio is not.
+        src = Path("/tmp/tiktok_h264.mp4")
+        probe_info = {
+            "vcodec": "h264", "acodec": "aac", "aprofile": "HE-AACv2",
+            "width": 720, "height": 1280,
+            "pix_fmt": "yuv420p", "sar": "1:1",
+            "duration": 74.0,
+        }
+        small = type("S", (), {"st_size": 13 * 1024 * 1024})()
+        out, ran, produced_out = self._run(src, probe_info, lambda n: small)
+
+        self.assertEqual(out, produced_out)
+        self.assertEqual(len(ran), 1)
+        cmd = ran[0]
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
+
+    def test_needs_audio_fix(self):
+        self.assertFalse(extractor._needs_audio_fix({"acodec": "aac", "aprofile": "LC"}))
+        self.assertFalse(extractor._needs_audio_fix({"acodec": None}))
+        self.assertTrue(extractor._needs_audio_fix({"acodec": "aac", "aprofile": "HE-AACv2"}))
+        self.assertTrue(extractor._needs_audio_fix({"acodec": "opus", "aprofile": None}))
+
     def test_non_hevc_crf_overshoot_falls_through_to_ladder(self):
         src = Path("/tmp/vp9_source.mp4")
         probe_info = {
