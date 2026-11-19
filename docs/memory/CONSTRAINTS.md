@@ -38,6 +38,8 @@
 - Pass `message_thread_id` through all Telegram send calls — required for forum topic (supergroup thread) support
 - YouTube videos over `FETCH_MAX_YT_DURATION` seconds (default 300) are silently skipped via `precheck_duration()` in `extractor.py` — no bot output, original message left untouched; metadata-only yt-dlp call (download=False) so no download occurs (updated 2026-05-10)
 - Do NOT add fetch-bot back to PM2 — NSSM decoupling was deliberate (PM2 coupling caused repeated outages)
+- TikTok photo posts (`/photo/`) are unsupported by yt-dlp; gallery-dl returns the slides plus the soundtrack mp3, and `_build_slideshow()` renders them into one H.264/AAC video — never send them as a photo album (it arrives silent). Slides in one post differ in size, so each slide is its own looped ffmpeg input; the concat demuxer truncates the video track (added 2026-11-18)
+- TikTok formats report `vcodec=h264`, not `avc1`, so every `[vcodec^=avc1]` filter in the format selector misses and TikTok falls through to `b` (1080p HEVC), which then gets transcoded (added 2026-11-18)
 - fetch-bot service must use `SERVICE_DELAYED_AUTO_START` — plain `SERVICE_AUTO_START` races the P: volume at boot and NSSM dies with "The system cannot open the file" (Event 7024) (updated 2026-08-12)
 - Delete original user message only after at least one repost succeeds — prevents link disappearing on upload timeout
 - On extraction failure, duration-rejection, or upload error: send a per-URL fallback that preserves original URL and post caption — never drop the link silently (updated 2026-05-08)

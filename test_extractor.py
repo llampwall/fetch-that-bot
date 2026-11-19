@@ -61,6 +61,64 @@ class ExtractMediaTests(unittest.TestCase):
 
             extractor.cleanup(result)
 
+    def test_photo_post_with_soundtrack_is_sent_as_one_video(self):
+        # TikTok photo posts: yt-dlp fails, gallery-dl returns slides + mp3.
+        # Sent as an album they arrive silent; they must go out as one video.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            download_dir = Path(temp_dir) / "download"
+
+            def fallback(url, fallback_dir):
+                Path(fallback_dir).mkdir(parents=True, exist_ok=True)
+                files = [Path(fallback_dir) / n for n in ("000_a.mp3", "001_a.jpg", "002_a.jpg")]
+                for f in files:
+                    f.write_bytes(b"x")
+                return files
+
+            built = {}
+
+            def fake_build(images, audio, out):
+                built["images"], built["audio"] = images, audio
+                out.write_bytes(b"video")
+                return out
+
+            with (
+                patch("extractor.tempfile.mkdtemp", return_value=str(download_dir)),
+                patch("extractor.yt_dlp.YoutubeDL", FakeYoutubeDL),
+                patch("extractor._gallery_dl_fallback", fallback),
+                patch("extractor._build_slideshow", fake_build),
+                patch("extractor._prepare_video", lambda p: (p, {"width": 750, "height": 1250, "duration": 59})),
+            ):
+                result = extractor.extract_media("https://www.tiktok.com/@a/photo/1", "TikTok")
+
+            self.assertEqual([p.name for p in built["images"]], ["001_a.jpg", "002_a.jpg"])
+            self.assertEqual(built["audio"].name, "000_a.mp3")
+            self.assertEqual(len(result.items), 1)
+            self.assertEqual(result.items[0].media_type, "video")
+            self.assertEqual(result.items[0].file_path.name, "slideshow.mp4")
+            extractor.cleanup(result)
+
+    def test_photo_post_falls_back_to_album_when_render_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            download_dir = Path(temp_dir) / "download"
+
+            def fallback(url, fallback_dir):
+                Path(fallback_dir).mkdir(parents=True, exist_ok=True)
+                files = [Path(fallback_dir) / n for n in ("000_a.mp3", "001_a.jpg", "002_a.jpg")]
+                for f in files:
+                    f.write_bytes(b"x")
+                return files
+
+            with (
+                patch("extractor.tempfile.mkdtemp", return_value=str(download_dir)),
+                patch("extractor.yt_dlp.YoutubeDL", FakeYoutubeDL),
+                patch("extractor._gallery_dl_fallback", fallback),
+                patch("extractor._build_slideshow", lambda *a: None),
+            ):
+                result = extractor.extract_media("https://www.tiktok.com/@a/photo/1", "TikTok")
+
+            self.assertEqual([i.media_type for i in result.items], ["photo", "photo"])
+            extractor.cleanup(result)
+
     def test_metadata_caption_is_not_truncated_before_formatting(self):
         result = extractor.ExtractionResult(platform="X")
         caption = "a" * 300

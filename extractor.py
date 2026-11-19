@@ -71,6 +71,10 @@ def _is_video(path: Path) -> bool:
     return path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".avi"}
 
 
+def _is_audio(path: Path) -> bool:
+    return path.suffix.lower() in {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav"}
+
+
 def _probe_video(path: Path) -> dict | None:
     """Run ffprobe on a video file and return codec/dimensions/duration info."""
     try:
@@ -243,13 +247,82 @@ def _prepare_video(path: Path) -> tuple[Path, dict | None]:
     return path, info
 
 
-def _collect_files(download_dir: str) -> list[Path]:
+def _collect_files(download_dir: str, include_audio: bool = False) -> list[Path]:
     """Collect all media files from a download directory."""
     files = []
     for f in sorted(Path(download_dir).iterdir()):
-        if _is_image(f) or _is_video(f):
+        if _is_image(f) or _is_video(f) or (include_audio and _is_audio(f)):
             files.append(f)
     return files
+
+
+def _probe_duration(path: Path) -> float:
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
+            capture_output=True, text=True, check=True, timeout=30,
+            creationflags=_NO_WINDOW,
+        )
+        return float(json.loads(result.stdout).get("format", {}).get("duration") or 0)
+    except Exception:
+        return 0.0
+
+
+_SLIDE_MIN_SECONDS = 2.0
+_SLIDE_DEFAULT_SECONDS = 3.0
+_SLIDESHOW_MAX_DIM = (1080, 1920)
+
+
+def _build_slideshow(images: list[Path], audio: Path, out: Path) -> Path | None:
+    """Render image slides over their soundtrack as one H.264/AAC video.
+
+    TikTok photo posts are a set of images played over a music track. yt-dlp
+    rejects them and gallery-dl hands back the images plus the track as an mp3;
+    sent as a photo album the post arrives silent. The slides split the track's
+    length evenly (at least `_SLIDE_MIN_SECONDS` each) on a canvas sized to the
+    largest slide, and the track plays once from the start.
+
+    Slides in one post differ in size (one 11-slide post ran 964 to 1250 px
+    tall), which breaks ffmpeg's concat demuxer, so each slide is its own
+    looped input, normalized to the canvas before the concat filter joins them.
+    """
+    audio_seconds = _probe_duration(audio)
+    if audio_seconds > 0:
+        per_slide = max(audio_seconds / len(images), _SLIDE_MIN_SECONDS)
+    else:
+        per_slide = _SLIDE_DEFAULT_SECONDS
+
+    dims = [_probe_video(img) or {} for img in images]
+    w = max((d.get("width") or 0) for d in dims) or 1080
+    h = max((d.get("height") or 0) for d in dims) or 1920
+    scale = min(_SLIDESHOW_MAX_DIM[0] / w, _SLIDESHOW_MAX_DIM[1] / h, 1.0)
+    w, h = int(w * scale) // 2 * 2, int(h * scale) // 2 * 2
+
+    cmd = ["ffmpeg", "-y"]
+    for img in images:
+        cmd += ["-loop", "1", "-framerate", "25", "-t", f"{per_slide:.3f}", "-i", str(img)]
+    cmd += ["-i", str(audio)]
+    chains = [
+        f"[{i}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[s{i}]"
+        for i in range(len(images))
+    ]
+    joined = "".join(f"[s{i}]" for i in range(len(images)))
+    chains.append(f"{joined}concat=n={len(images)}:v=1:a=0[v]")
+    cmd += [
+        "-filter_complex", ";".join(chains),
+        "-map", "[v]", "-map", f"{len(images)}:a",
+        "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage", "-crf", "23",
+        "-c:a", "aac", "-b:a", f"{_AUDIO_BITRATE_KBPS}k",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=600, creationflags=_NO_WINDOW)
+    if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+        stderr_tail = (proc.stderr or b"").decode("utf-8", "replace")[-500:]
+        logger.warning("Slideshow render failed (rc=%d): %s", proc.returncode, stderr_tail)
+        return None
+    return out
 
 
 def _gallery_dl_fallback(url: str, download_dir: str) -> list[Path]:
@@ -266,11 +339,12 @@ def _gallery_dl_fallback(url: str, download_dir: str) -> list[Path]:
 
     subprocess.run(cmd, capture_output=True, timeout=60, creationflags=_NO_WINDOW)
 
-    # gallery-dl may still create subdirs — collect from all of them
-    files = _collect_files(download_dir)
+    # gallery-dl may still create subdirs — collect from all of them. Audio is
+    # kept so a photo post's soundtrack can be laid under its slides.
+    files = _collect_files(download_dir, include_audio=True)
     for sub in Path(download_dir).iterdir():
         if sub.is_dir():
-            files.extend(_collect_files(str(sub)))
+            files.extend(_collect_files(str(sub), include_audio=True))
     return files
 
 
@@ -443,6 +517,17 @@ def extract_media(url: str, platform: str) -> ExtractionResult:
     if not result.items:
         try:
             fallback_files = _gallery_dl_fallback(url, download_dir)
+            images = [f for f in fallback_files if _is_image(f)]
+            audio = [f for f in fallback_files if _is_audio(f)]
+            slideshow = None
+            if images and audio and not any(_is_video(f) for f in fallback_files):
+                slideshow = _build_slideshow(
+                    images, audio[0], Path(download_dir) / "slideshow.mp4",
+                )
+            if slideshow is not None:
+                # Every slide is in the video, so it goes out alone rather
+                # than beside a silent album of the same images.
+                fallback_files = [slideshow]
             for f in fallback_files[:10]:
                 if _is_video(f):
                     f, vinfo = _prepare_video(f)
